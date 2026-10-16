@@ -91,7 +91,12 @@ jobs:
         run: cargo test -p rdm-gui -p rdm-ipc -p rdm-service -p rdm-native-host --locked
 
       - name: Build Firefox native binaries
-        run: cargo build -p rdm-service -p rdm-native-host --locked
+        run: cargo build -p rdm -p rdm-service -p rdm-native-host --locked
+
+      - name: Test CLI against real service
+        run: |
+          python3 tests/cli_service_smoke.py target/debug
+          python3 tests/cli_protocol_smoke.py target/debug
 
       - name: Test Firefox native stdio to real service
         run: python3 extensions/firefox/tests/native_smoke.py target/debug

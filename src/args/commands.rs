@@ -18,6 +18,10 @@ pub enum Command {
 
         #[command(flatten)]
         opts: DownloadOpts,
+
+        /// Return after service acceptance (direct HTTP/HTTPS files only)
+        #[arg(long)]
+        detach: bool,
     },
 
     /// Mirror a remote directory listing into a local directory
@@ -49,6 +53,12 @@ pub enum Command {
     Queue {
         #[command(subcommand)]
         command: QueueCommand,
+    },
+
+    /// Inspect downloads managed by the shared service (does not start it)
+    Jobs {
+        #[command(subcommand)]
+        command: JobsCommand,
     },
 
     /// Show the effective configuration
@@ -131,4 +141,21 @@ pub enum ClearTarget {
     /// Items that already finished.
     #[value(aliases = ["d", "finished"])]
     Done,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum JobsCommand {
+    /// List the service's bounded in-memory job history
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect an instance-qualified job handle
+    Inspect {
+        handle: crate::managed::Handle,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Request cancellation; the service drains the worker asynchronously
+    Cancel { handle: crate::managed::Handle },
 }

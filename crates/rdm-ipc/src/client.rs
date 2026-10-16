@@ -32,7 +32,7 @@ impl fmt::Display for Error {
             Self::Uncertain => f.write_str("The command outcome could not be confirmed. Reconnect and inspect downloads before retrying; it may have been accepted."),
             Self::Disconnected => f.write_str("Disconnected from the service. Download state is unknown; work may still be running."),
             Self::StartupFailed => f.write_str("RDM service did not become ready. Run rdm-service in a terminal to check its configuration and startup errors."),
-            Self::MissingExecutable => f.write_str("Could not start rdm-service. Build/install it alongside rdm-gui or put it on PATH."),
+            Self::MissingExecutable => f.write_str("Could not start rdm-service. Build/install it alongside rdm or rdm-gui or put it on PATH."),
             Self::Rejected(_, message) => f.write_str(message),
         }
     }

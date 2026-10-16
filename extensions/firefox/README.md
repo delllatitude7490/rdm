@@ -63,8 +63,9 @@ not an AMO-ready signed XPI.
 - If the bridge/reply disappears, the transfer may already have been accepted.
   **Inspect the GUI before retrying.** No automatic mutation retry is performed.
 - Service recent history is in-memory only; service restart does not restore it.
-  Legacy CLI coordination and multi-download scheduling remain follow-ups. Do not
-  use the legacy CLI against the same destination concurrently.
+  Direct HTTP/HTTPS CLI files share this service. Provider/SFTP, listings, sync
+  and persisted queue routes remain outside coordination: do not use those
+  against the same destination concurrently. Multi-download scheduling is future work.
 
 ## Permissions and privacy
 

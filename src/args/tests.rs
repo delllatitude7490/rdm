@@ -4,7 +4,9 @@
 
 use clap::{CommandFactory, Parser};
 
-use super::{Cli, ClearTarget, Command, QueueCommand, RetryTarget, normalize_extensions, parse_url};
+use super::{
+    ClearTarget, Cli, Command, QueueCommand, RetryTarget, normalize_extensions, parse_url,
+};
 
 fn parse(args: &[&str]) -> Cli {
     Cli::try_parse_from(args).expect("expected args to parse")
@@ -216,7 +218,7 @@ fn download_subcommand_and_alias_match() {
     for name in ["download", "d"] {
         let cli = parse(&["rdm", name, "https://example.com/f.zip", "-c", "4"]);
         match cli.command {
-            Some(Command::Download { url, opts }) => {
+            Some(Command::Download { url, opts, .. }) => {
                 assert_eq!(url, "https://example.com/f.zip");
                 assert_eq!(opts.connections, Some(4));
             }
@@ -515,4 +517,34 @@ fn repeated_ext_flags_accumulate() {
         }
         other => panic!("expected sync, got {other:?}"),
     }
+}
+
+#[test]
+fn managed_flags_and_commands_have_narrow_scope() {
+    assert!(Cli::try_parse_from(["rdm", "--detach"]).is_err());
+    assert!(
+        Cli::try_parse_from(["rdm", "https://example.com/file.zip", "--detach"])
+            .unwrap()
+            .detach
+    );
+    assert!(matches!(
+        Cli::try_parse_from(["rdm", "download", "https://example.com/file", "--detach"])
+            .unwrap()
+            .command,
+        Some(Command::Download { detach: true, .. })
+    ));
+    for args in [
+        vec!["rdm", "sync", "https://example.com/", "--detach"],
+        vec![
+            "rdm",
+            "queue",
+            "add",
+            "https://example.com/file",
+            "--detach",
+        ],
+        vec!["rdm", "jobs", "cancel", "1"],
+    ] {
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+    assert!(Cli::try_parse_from(["rdm", "jobs", "inspect", "123-456:1", "--json"]).is_ok());
 }

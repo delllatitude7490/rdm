@@ -48,7 +48,7 @@ mod parse;
 mod tests;
 
 pub use cli::{Cli, DownloadOpts};
-pub use commands::{ClearTarget, Command, QueueCommand, RetryTarget};
+pub use commands::{ClearTarget, Command, JobsCommand, QueueCommand, RetryTarget};
 pub use parse::{
     MAX_CONNECTIONS, MAX_PARALLEL, normalize_extensions, parse_connections, parse_parallel,
     parse_retry_target, parse_url,

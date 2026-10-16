@@ -6,9 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::transfer::{self, GuiSink};
 use rdm::config::Config;
-use rdm_ipc::{
-    Add, ErrorCode, Finished, Job, MAX_JOBS, Packet, Request, Response, Snapshot, VERSION,
-};
+use rdm_ipc::{ErrorCode, Finished, Job, MAX_JOBS, Packet, Request, Response, Snapshot, VERSION};
 use rdm_ipc::{
     runtime::{Instance, Paths, uid},
     wire,
@@ -92,7 +90,7 @@ impl Manager {
     }
     fn add(
         &mut self,
-        add: Add,
+        request: Request,
         workers: &mut JoinSet<(u64, Finished)>,
         events: &watch::Sender<Snapshot>,
     ) -> Response {
@@ -108,12 +106,17 @@ impl Manager {
                 "A managed download is already active. Cancel it or wait for completion.",
             );
         }
-        let input = match transfer::prepare(
-            &add.url,
-            &add.directory,
-            &add.filename,
-            self.config.connections,
-        ) {
+        let prepared = match request {
+            Request::Add(add) => transfer::prepare(
+                &add.url,
+                &add.directory,
+                &add.filename,
+                self.config.connections,
+            ),
+            Request::AddCli(add) => transfer::prepare_cli(&add),
+            _ => unreachable!("only add requests reach admission"),
+        };
+        let input = match prepared {
             Ok(input) => input,
             Err(message) => {
                 return Response::Error {
@@ -153,7 +156,7 @@ impl Manager {
     ) -> Response {
         match request {
             Request::List | Request::Subscribe => Response::Snapshot(self.snapshot()),
-            Request::Add(add) => self.add(add, workers, events),
+            request @ (Request::Add(_) | Request::AddCli(_)) => self.add(request, workers, events),
             Request::Cancel { instance, id } => {
                 if instance != self.instance {
                     return error(

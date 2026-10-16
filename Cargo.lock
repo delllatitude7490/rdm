@@ -3239,6 +3239,7 @@ dependencies = [
  "dirs",
  "futures-util",
  "libc",
+ "rdm-ipc",
  "reqwest",
  "serde",
  "serde_json",

@@ -27,6 +27,10 @@ pub struct Cli {
     #[arg(short, long, value_name = "N", value_parser = parse_parallel)]
     pub parallel: Option<usize>,
 
+    /// Return after service acceptance (direct HTTP/HTTPS files only)
+    #[arg(long, requires = "url")]
+    pub detach: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
