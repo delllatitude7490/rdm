@@ -1,0 +1,25 @@
+[package]
+name = "rdm-gui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+[features]
+# Start with software rendering. Benchmark before selecting a GPU backend.
+default = []
+gpu = ["iced/wgpu"]
+
+[dependencies]
+rdm = { path = "../.." }
+iced = { version = "0.14", default-features = false, features = ["tiny-skia", "tokio", "x11", "wayland", "linux-theme-detection"] }
+tokio = { version = "1", features = ["sync", "fs", "time"] }
+tokio-util = "0.7"
+reqwest = { version = "0.13", default-features = false }
+dirs = "6"
+anyhow = "1"
+
+[dev-dependencies]
+axum = "0.8"
+tempfile = "3"
+futures-util = "0.3"
