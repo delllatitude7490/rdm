@@ -1,0 +1,20 @@
+[package]
+name = "rdm-service"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+rdm = { path = "../.." }
+rdm-ipc = { path = "../rdm-ipc" }
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+reqwest = { version = "0.13", default-features = false }
+dirs = "6"
+anyhow = "1"
+serde_json = "1"
+
+[dev-dependencies]
+axum = "0.8"
+tempfile = "3"
+futures-util = "0.3"
