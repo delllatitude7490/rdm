@@ -3273,6 +3273,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rdm-native-host"
+version = "0.1.0"
+dependencies = [
+ "rdm-ipc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "rdm-service"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>RDM · Setup &amp; privacy</title><link rel="stylesheet" href="popup.css"><link rel="stylesheet" href="setup.css"></head>
+<body><main>
+<header><img src="icons/download.svg" width="36" height="36" alt=""><div><h1>RDM</h1><p>Firefox, meet your download manager.</p></div></header>
+<h2>Connect once. Download quietly.</h2>
+<p>This Linux preview needs RDM's Rust service and Native Messaging bridge. The extension does not install native applications itself.</p>
+<ol><li>Build matching binaries from the RDM repository:<pre><code>cargo build -p rdm-service -p rdm-gui -p rdm-native-host --release --locked</code></pre></li><li>Register the bridge for your user (no sudo):<pre><code>./target/release/rdm-native-host --install</code></pre>Keep the binaries at that location. Registration refuses to replace an existing manifest.</li><li>Use <strong>Check connection</strong> in the popup, or send a direct public file link. Sending a link starts the service if needed. A connection check alone does not start it.</li></ol>
+<h2>Only when you ask</h2>
+<p>Right-click a link and choose <strong>Download with RDM</strong>, paste a URL in the popup, or use <strong>Use current tab</strong> and review before sending. A normal web page URL is not necessarily a downloadable file.</p>
+<p>Downloads use RDM's configured folder. One managed download can run at a time. Accepted means the service received it—not that it completed. Open the RDM GUI for progress, cancellation and shutdown.</p>
+<h2>Privacy &amp; permissions</h2>
+<p>Only a URL you explicitly choose is sent to the local Rust bridge, then to RDM. The URL can contain sensitive signatures or query tokens. RDM contacts the requested server to download it, following its existing network safety and resume-file rules.</p>
+<ul><li><strong>Native Messaging:</strong> talk to the installed local bridge.</li><li><strong>Menus:</strong> add a right-click action for links.</li><li><strong>Active tab:</strong> fill a tab URL after you click the toolbar action. No all-sites access or browsing-history permission.</li></ul>
+<p>The manifest declares browsing-activity transmission because your selected URL leaves the extension for a local application. No analytics, telemetry, remote scripts, automatic interception, cookies, authorization headers, history scanning, or extension URL storage. Private browsing is not supported in this preview.</p>
+<h2>If something goes wrong</h2>
+<p>If a reply is lost, the download may still have started. Inspect the GUI before retrying; the extension never resends automatically. For startup failures, run <code>rdm-service</code> in a terminal. Check that <code>XDG_RUNTIME_DIR</code> is private and user-owned.</p>
+<p>Registration is for ordinary desktop Firefox. Flatpak/Snap browser sandbox access is not configured by this preview. This is an unsigned development extension, not an AMO release.</p>
+</main></body></html>

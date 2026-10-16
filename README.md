@@ -201,3 +201,22 @@ cargo build --release
 - [goodls](https://github.com/tanaikech/goodls)
 - [gdown](https://github.com/wkentaro/gdown)
 - [pixeldrain-downloader](https://github.com/neiromaster/pixeldrain-downloader)
+
+## Firefox link handoff (Linux preview)
+
+A plain-JavaScript Firefox extension can send an explicitly chosen file URL to
+RDM through a small Rust Native Messaging host. No webview, React, localhost
+server, automatic interception or browsing-history access.
+
+```sh
+cargo build -p rdm-service -p rdm-gui -p rdm-native-host --release --locked
+./target/release/rdm-native-host --install
+```
+
+Then load `extensions/firefox/manifest.json` as a temporary add-on from
+`about:debugging#/runtime/this-firefox`. Right-click a direct file link and choose
+**Download with RDM**, or use the popup. Firefox 140+ on ordinary desktop Linux is
+required; the extension is unsigned and not an AMO release. See the
+[Firefox setup, permissions and limits](extensions/firefox/README.md) and
+[native host protocol](crates/rdm-native-host/README.md). Existing single-managed-
+download, service-history and legacy-CLI coordination limits still apply.

@@ -87,7 +87,9 @@ operation can delay it; there is no unsafe forced-abort button.
   this service. Do not run a legacy CLI download against the same destination
   concurrently. Cross-interface coordination is a separate follow-up.
 - Only direct HTTP/HTTPS files. Known provider shares, directory-shaped URLs,
-  SFTP and userinfo credentials are still refused. No browser extension yet.
+  SFTP and userinfo credentials are still refused. Firefox explicit link handoff
+  is available through the separate `rdm-native-host` preview; see
+  [Firefox setup](../../extensions/firefox/README.md).
 - No per-file pause, multi-download scheduler, durable history or queue controls.
 - The service loads existing config once at startup, retaining parse errors and
   existing network/file-safety rules. Restart it to apply config/environment

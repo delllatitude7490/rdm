@@ -79,13 +79,32 @@ jobs:
           key: iced-gui
 
       - name: Format native crates
-        run: cargo fmt -p rdm-gui -p rdm-ipc -p rdm-service --check
+        run: cargo fmt -p rdm-gui -p rdm-ipc -p rdm-service -p rdm-native-host --check
 
       - name: Check native crates
-        run: cargo check -p rdm-gui -p rdm-ipc -p rdm-service --all-targets --locked
+        run: cargo check -p rdm-gui -p rdm-ipc -p rdm-service -p rdm-native-host --all-targets --locked
 
       - name: Lint native crates
-        run: cargo clippy -p rdm-gui -p rdm-ipc -p rdm-service --all-targets --locked -- -D warnings
+        run: cargo clippy -p rdm-gui -p rdm-ipc -p rdm-service -p rdm-native-host --all-targets --locked -- -D warnings
 
-      - name: Test GUI, IPC, transfer adapter and service lifecycle
-        run: cargo test -p rdm-gui -p rdm-ipc -p rdm-service --locked
+      - name: Test native crates and service lifecycle
+        run: cargo test -p rdm-gui -p rdm-ipc -p rdm-service -p rdm-native-host --locked
+
+      - name: Build Firefox native binaries
+        run: cargo build -p rdm-service -p rdm-native-host --locked
+
+      - name: Test Firefox native stdio to real service
+        run: python3 extensions/firefox/tests/native_smoke.py target/debug
+
+  firefox:
+    name: Firefox extension tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Test explicit handoff and permission boundaries
+        run: node --test extensions/firefox/tests/*.test.js
+      - name: Lint Firefox manifest and sources
+        run: npx --yes web-ext@10.8.0 lint --source-dir extensions/firefox --ignore-files 'tests' 'tests/**' package.json README.md
