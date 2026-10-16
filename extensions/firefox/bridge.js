@@ -39,7 +39,7 @@ export function createBridge(api) {
     if (message?.type === "feedback") {
       const title = await api.action.getTitle({});
       // Only our fixed messages, not arbitrary strings in title, enter the UI.
-      const replies = ["accepted","ready","active","busy","stopping","invalid","runtime","incompatible","version","missing_service","startup","unavailable","uncertain","service","bridge","private"];
+      const replies = ["accepted","queued","ready","active","busy","stopping","invalid","runtime","incompatible","version","missing_service","startup","unavailable","uncertain","service","bridge","private"];
       const code = replies.find(code => title === `RDM — ${result(code).message}`);
       return code ? result(code) : { ok: true, code: "idle", message: "Choose a file link. Downloads go to RDM's configured folder." };
     }

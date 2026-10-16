@@ -46,10 +46,13 @@ not an AMO-ready signed XPI.
 
 ## Feedback and deliberate limits
 
-- Toolbar badge: ✓ for accepted/connected, ! for errors. Hover/popup shows the
+- Toolbar badge: ✓ for accepted/queued/connected, ! for errors. Hover/popup shows the
   generic last result (action title, not stored URLs). Popup uses textContent,
   never HTML interpolation of untrusted data.
-- One active managed transfer globally. A second Add returns Busy, not a queue.
+- One running managed transfer globally. Further links join the service-owned
+  FIFO. **Queued in RDM** means it has not started; **Accepted** is not completion.
+  Open the GUI for queue position, queued removal or active cancellation.
+  At 64 unfinished jobs the bounded queue refuses new submissions explicitly.
   Accepted means the request reached RDM; it does **not** mean completion.
 - Default save folder and automatic filename come from RDM, never the webpage.
   Change service config/restart it to change the folder.
@@ -65,7 +68,7 @@ not an AMO-ready signed XPI.
 - Service recent history is in-memory only; service restart does not restore it.
   Direct HTTP/HTTPS CLI files share this service. Provider/SFTP, listings, sync
   and persisted queue routes remain outside coordination: do not use those
-  against the same destination concurrently. Multi-download scheduling is future work.
+  against the same destination concurrently. Parallel transfers and durable service queue/history are future work.
 
 ## Permissions and privacy
 
@@ -97,7 +100,7 @@ python3 extensions/firefox/tests/native_smoke.py target/debug
 
 The smoke test uses an isolated private runtime/config/HOME and per-child
 `RDM_ALLOW_PRIVATE=1` for its local HTTP fixture. It exercises real native stdio,
-registration, auto-start, Busy, exact downloaded bytes, host-exit independence,
+registration, auto-start, queued feedback/removal, exact downloaded bytes, host-exit independence,
 output protection, command restrictions, shutdown, and read-only status. It does
 not install an extension or claim live Firefox API coverage. Node tests mock the
 browser API for menu/permission/no-retry boundaries.
@@ -123,3 +126,8 @@ rm -- "$HOME/.mozilla/native-messaging-hosts/rdm_firefox.json"
 
 This does not stop an already running service or remove downloads/configuration.
 Use the GUI's explicit service stop, or `rdm-service --shutdown`, if desired.
+
+Queue upgrade: stop an old service with its matching binary before rebuilding.
+Build matching Rust binaries (internal IPC v3) and reload this extension (0.2.0).
+The external Native Messaging framing/protocol remains v1. Queue and history
+are in memory only; a service restart loses pending work and does not replay it.

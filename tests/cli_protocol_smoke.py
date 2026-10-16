@@ -41,7 +41,7 @@ for mode in ('version', 'lost-add', 'lost-feed', 'lost-cancel', 'unsafe-error', 
             path = directory / 'service.sock'
             server.bind(str(path)); path.chmod(0o600); server.listen(4); server.settimeout(10)
             snapshot = {'instance': 'fake-1', 'revision': 1, 'default_directory': str(root), 'shutting_down': False, 'jobs': []}
-            job = {'id': 1, 'label': 'file.bin', 'destination': str(root / 'file.bin'), 'progress': {'total': 100, 'downloaded': 0, 'phase': 'Downloading', 'has_notice': False}, 'cancelling': False, 'result': None}
+            job = {'id': 1, 'label': 'file.bin', 'destination': str(root / 'file.bin'), 'progress': {'total': 100, 'downloaded': 0, 'phase': 'Downloading', 'has_notice': False}, 'queued': False, 'cancelling': False, 'result': None}
             def peer():
                 try:
                     count = {'version': 1, 'lost-add': 2, 'lost-feed': 3, 'lost-cancel': 1, 'unsafe-error': 2}[mode]
@@ -55,7 +55,7 @@ for mode in ('version', 'lost-add', 'lost-feed', 'lost-cancel', 'unsafe-error', 
                             if command == 'add_cli': snapshot['jobs'] = [job]
                             if (mode == 'lost-add' and command == 'add_cli') or (mode == 'lost-cancel' and command == 'cancel'): continue
                             if mode == 'unsafe-error' and command == 'add_cli': job['result'] = {'Failed': '\x1b[2Junsafe\x07error'}
-                            data = json.dumps({'version': 1 if mode == 'version' else 2, 'body': {'type': 'snapshot', 'data': snapshot}}).encode()
+                            data = json.dumps({'version': 1 if mode == 'version' else 3, 'body': {'type': 'snapshot', 'data': snapshot}}).encode()
                             stream.sendall(struct.pack('>I', len(data)) + data)
                     server.settimeout(.3)
                     try:

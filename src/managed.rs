@@ -68,6 +68,7 @@ fn find<'a>(snapshot: &'a Snapshot, handle: &Handle) -> Result<&'a Job> {
 }
 fn print_job(instance: &str, job: &Job) {
     let state = match &job.result {
+        None if job.queued => "queued",
         None if job.cancelling => "cancelling",
         None => "active",
         Some(Finished::Completed { .. }) => "completed",
@@ -99,6 +100,10 @@ pub fn jobs(command: &JobsCommand) -> Result<()> {
                 let s = client::request(Request::List).await.map_err(safe_error)?;
                 let j = find(&s, handle)?;
                 if *json { println!("{}", serde_json::to_string(j)?); } else { print_job(&s.instance, j); }
+            }
+            JobsCommand::Remove { handle } => {
+                client::request(Request::RemoveQueued { instance: handle.instance.clone(), id: handle.id }).await.map_err(safe_error)?;
+                println!("Removed queued job {handle}; retained as cancelled history.");
             }
             JobsCommand::Cancel { handle } => {
                 let s = client::request(Request::Cancel { instance: handle.instance.clone(), id: handle.id }).await.map_err(safe_error)?;
@@ -158,7 +163,12 @@ pub fn download(
             println!("{handle}");
             if !quiet {
                 eprintln!(
-                    "Accepted by RDM (not completed). Inspect with `rdm jobs inspect {handle}`."
+                    "{} by RDM (not completed). Inspect with `rdm jobs inspect {handle}`.",
+                    if find(&initial, &handle)?.queued {
+                        "Queued"
+                    } else {
+                        "Accepted"
+                    }
                 );
             }
             return Ok(());
@@ -223,7 +233,10 @@ async fn wait(
             return Ok(result.clone());
         }
         tokio::select! {
-            next = feed.next() => snapshot = next.map_err(safe_error)?,
+            next = feed.next() => {
+                let next = next.map_err(safe_error)?;
+                if next.instance != snapshot.instance || next.revision >= snapshot.revision { snapshot = next; }
+            },
             _ = async { tokio::select! { _ = interrupt.recv() => {}, _ = terminate.recv() => {} } } => {
                 if cancelling { bail!("Stopped waiting; cancellation has not yet been confirmed."); }
                 // Await the one-shot cancellation acknowledgement too. A lost

@@ -21,12 +21,13 @@ The GUI starts the matching service on demand. **Closing the window leaves
 managed downloads running; reopening reconnects.** Stop the service explicitly
 from the GUI or with `rdm-service --shutdown` to cancel and drain work.
 
-This preview supports one direct HTTP/HTTPS managed download at a time. Records
-are bounded and in-memory, not durable history. Direct HTTP/HTTPS CLI files,
+This preview runs one direct HTTP/HTTPS managed download at a time and queues
+further submissions FIFO. Queue and history are bounded and in-memory, not
+durable. Direct HTTP/HTTPS CLI files,
 the GUI and Firefox handoffs share admission and job state. Provider/SFTP routes,
 HTTP listings, sync and the persisted queue remain outside the service: never
-target the same output concurrently from those legacy paths. Concurrent managed
-queues and pause remain future milestones.
+target the same output concurrently from those legacy paths. Parallel managed
+transfers, durable queue/history and pause remain future milestones.
 
 See [GUI setup](crates/rdm-gui/README.md) and
 [service architecture, runtime requirements and limitations](crates/rdm-service/README.md).
@@ -86,10 +87,11 @@ cargo build -p rdm -p rdm-service --release --locked
 ./target/release/rdm jobs list --json
 ./target/release/rdm jobs inspect INSTANCE:ID --json
 ./target/release/rdm jobs cancel INSTANCE:ID
+./target/release/rdm jobs remove INSTANCE:ID
 ```
 
-- The default waits for the service's terminal result; success means completed
-  bytes, not just acceptance. `--quiet` suppresses progress, not failure exit codes.
+- The default waits through queue time for the service's terminal result; success
+  means completed bytes, not just acceptance. `--quiet` suppresses progress, not failure exit codes.
 - `--detach` returns after acceptance, printing the full `INSTANCE:ID` handle to
   stdout even with `--quiet`. Acceptance does **not** mean completion. Closing
   the CLI or GUI does not stop the detached download.
@@ -111,22 +113,39 @@ cargo build -p rdm -p rdm-service --release --locked
   for a different `-o` path. Unlike the old interactive path, managed downloads
   never prompt for overwrite. Valid partial state follows the engine's normal
   resume rules: retry the same URL and output after cancellation has finished.
-- Missing service, unsafe runtime, incompatible version, Busy or lost replies
-  fail explicitly; no silent fallback to an independent worker and no automatic
+- Missing service, unsafe runtime, incompatible version, a full queue or lost
+  replies fail explicitly; no silent fallback to an independent worker and no automatic
   mutation retry. Inspect before resending an uncertain command.
-- One active managed job across all clients; 64 recent in-memory records, lost
-  on service restart. This is not the persisted `rdm queue` and not a new queue.
+- One running managed job across all clients; further validated submissions join
+  the service-owned FIFO queue. At most 64 records total (running + queued +
+  finished); terminal history is evicted first. If all 64 are unfinished, new
+  submissions fail explicitly with queue-full feedback; no pending work is evicted.
+- `jobs list` distinguishes queued, active and finished results; `--json` includes
+  the `queued` flag and FIFO record order. `jobs cancel` can cancel either a queued
+  or running job. `jobs remove` only removes a job that has not started; a race
+  with promotion is rejected rather than cancelling a now-running transfer.
+  Removed jobs retain a cancelled history record so attached waiters can finish
+  truthfully. Once worker cleanup finishes, the next queued job starts.
+- Queued inputs do no network or output/resume-file work until their turn.
+  Existing-file and network policy are enforced again by the engine at execution.
+  Shutdown cancels queued work without starting it and drains the running worker.
+- The service queue and history are lost on restart: no automatic replay/resume.
+  This extends the existing service job set, not a GUI/extension-local queue.
+  The older persisted `rdm queue` below is unchanged and is NOT imported, merged
+  or processed by this scheduler. Its provider/listing workflows are deliberately
+  retained; migrating them safely is a separate compatibility milestone.
 - Provider shares, SFTP, directory-shaped URLs, discovered listings, sync and
   queue still use their existing routes. `--detach` is rejected for them. For
   extensionless direct links use `rdm download URL --detach` (the bare form may
   try listing discovery). Empty/failed discovery falls back to managed direct
   files unless the URL is directory-shaped; those retain the legacy path.
 
-This change uses internal IPC **version 2**. Before upgrading, explicitly stop
+This change uses internal IPC **version 3**. Before upgrading, explicitly stop
 any old service with its matching GUI/service binary. Build CLI, service, GUI
 and Native Messaging host from the same checkout if installed; an incompatible
 service is never automatically stopped or replaced. The Firefox extension's
-external Native Messaging protocol remains version 1.
+external Native Messaging protocol remains version 1. Reload the updated Firefox
+extension (0.2.0) too, so it recognizes the new `queued` acknowledgement.
 
 ## Sync
 

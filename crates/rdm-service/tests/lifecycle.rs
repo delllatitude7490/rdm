@@ -221,12 +221,22 @@ async fn one_owner_duplicate_launch_cancel_and_shutdown_drain() {
         .await
         .unwrap();
     service.until(|s| s.jobs[0].progress.downloaded > 0).await;
-    // Includes alias destinations and different names: this milestone admits
-    // only one managed transfer, even if the engine later chooses another name.
-    let error = client::request_at(&service.paths, service.add(&http.base, "other.bin"))
+    // Other inputs are now queued, not rejected; remove this one so the rest
+    // of this ownership/drain test can focus on its original active transfer.
+    let queued = client::request_at(&service.paths, service.add(&http.base, "other.bin"))
         .await
-        .unwrap_err();
-    assert!(matches!(error, client::Error::Rejected(ErrorCode::Busy, _)));
+        .unwrap();
+    let other = queued.jobs.last().unwrap();
+    assert!(other.queued);
+    client::request_at(
+        &service.paths,
+        Request::RemoveQueued {
+            instance: queued.instance,
+            id: other.id,
+        },
+    )
+    .await
+    .unwrap();
     let error = client::request_at(
         &service.paths,
         Request::Cancel {
@@ -469,4 +479,240 @@ async fn sigterm_cancels_and_drains_active_work() {
             .exists()
     );
     assert!(!service.root.path().join("downloads/signal.bin").exists());
+}
+
+#[tokio::test]
+async fn fifo_cancel_queued_then_cancel_running_starts_next_after_drain() {
+    let blocked = http(false).await;
+    let finite = http(true).await;
+    let mut service = Service::spawn(tempfile::tempdir().unwrap());
+    let initial = service.ready().await;
+    client::request_at(&service.paths, service.add(&blocked.base, "first.bin"))
+        .await
+        .unwrap();
+    service.until(|s| s.jobs[0].progress.downloaded > 0).await;
+    client::request_at(&service.paths, service.add(&finite.base, "second.bin"))
+        .await
+        .unwrap();
+    let s = client::request_at(&service.paths, service.add(&finite.base, "third.bin"))
+        .await
+        .unwrap();
+    assert_eq!(s.jobs.iter().filter(|j| j.running()).count(), 1);
+    assert!(!s.jobs[0].queued && s.jobs[1].queued && s.jobs[2].queued);
+    assert_eq!(s.jobs[1].progress.downloaded, 0);
+    assert!(!service.root.path().join("downloads/second.bin").exists());
+    assert!(
+        !service
+            .root
+            .path()
+            .join("downloads/second.bin.part")
+            .exists()
+    );
+    let error = client::request_at(
+        &service.paths,
+        Request::RemoveQueued {
+            instance: initial.instance.clone(),
+            id: s.jobs[0].id,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        client::Error::Rejected(ErrorCode::Invalid, _)
+    ));
+    let error = client::request_at(
+        &service.paths,
+        Request::RemoveQueued {
+            instance: "stale".into(),
+            id: s.jobs[2].id,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        client::Error::Rejected(ErrorCode::StaleInstance, _)
+    ));
+    let removed = client::request_at(
+        &service.paths,
+        Request::RemoveQueued {
+            instance: initial.instance.clone(),
+            id: s.jobs[2].id,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(removed.jobs[2].result, Some(Finished::Cancelled));
+    assert!(!removed.jobs[2].queued);
+    client::request_at(
+        &service.paths,
+        Request::Cancel {
+            instance: initial.instance,
+            id: s.jobs[0].id,
+        },
+    )
+    .await
+    .unwrap();
+    let done = service.until(|s| s.jobs[1].result.is_some()).await;
+    assert_eq!(done.jobs[0].result, Some(Finished::Cancelled));
+    assert!(matches!(
+        done.jobs[1].result,
+        Some(Finished::Completed { bytes: 30720, .. })
+    ));
+    assert_eq!(done.jobs[2].result, Some(Finished::Cancelled));
+    assert_eq!(
+        fs::read(service.root.path().join("downloads/second.bin")).unwrap(),
+        vec![42; 30720]
+    );
+    assert!(
+        !service
+            .root
+            .path()
+            .join("downloads/third.bin.part")
+            .exists()
+    );
+    service.shutdown().await;
+}
+
+#[tokio::test]
+async fn queue_preserves_fifo_through_completion_failure_and_existing_output() {
+    let finite = http(true).await;
+    let mut service = Service::spawn(tempfile::tempdir().unwrap());
+    service.ready().await;
+    client::request_at(&service.paths, service.add(&finite.base, "first.bin"))
+        .await
+        .unwrap();
+    // A 404 is validated and queued, then fails only when its turn arrives.
+    client::request_at(
+        &service.paths,
+        Request::Add(Add {
+            url: format!("{}/missing.bin", finite.base),
+            directory: service
+                .root
+                .path()
+                .join("downloads")
+                .to_string_lossy()
+                .into(),
+            filename: "missing.bin".into(),
+        }),
+    )
+    .await
+    .unwrap();
+    // Reuse the first output: must not corrupt it when this queued item starts.
+    client::request_at(&service.paths, service.add(&finite.base, "first.bin"))
+        .await
+        .unwrap();
+    client::request_at(&service.paths, service.add(&finite.base, "last.bin"))
+        .await
+        .unwrap();
+    let done = service
+        .until(|s| {
+            assert!(s.jobs.iter().filter(|j| j.running()).count() <= 1);
+            // No later job may start while an earlier FIFO job is unfinished.
+            let mut unfinished = false;
+            for job in &s.jobs {
+                if unfinished {
+                    assert!(!job.running());
+                }
+                unfinished |= job.active();
+            }
+            s.jobs.len() == 4 && s.jobs[3].result.is_some()
+        })
+        .await;
+    assert!(matches!(
+        done.jobs[0].result,
+        Some(Finished::Completed { .. })
+    ));
+    assert!(matches!(done.jobs[1].result, Some(Finished::Failed(_))));
+    assert!(matches!(
+        done.jobs[2].result,
+        Some(Finished::AlreadyPresent { .. })
+    ));
+    assert!(matches!(
+        done.jobs[3].result,
+        Some(Finished::Completed { .. })
+    ));
+    assert_eq!(
+        fs::read(service.root.path().join("downloads/first.bin")).unwrap(),
+        vec![42; 30720]
+    );
+    service.shutdown().await;
+}
+
+#[tokio::test]
+async fn full_queue_never_evicts_unfinished_work_and_shutdown_discards_pending() {
+    let blocked = http(false).await;
+    let mut service = Service::spawn(tempfile::tempdir().unwrap());
+    let initial = service.ready().await;
+    for n in 0..64 {
+        client::request_at(
+            &service.paths,
+            service.add(&blocked.base, &format!("file-{n}.bin")),
+        )
+        .await
+        .unwrap();
+    }
+    let s = service.ready().await;
+    assert_eq!(s.jobs.len(), 64);
+    assert_eq!(s.jobs.iter().filter(|j| j.running()).count(), 1);
+    assert_eq!(s.jobs.iter().filter(|j| j.queued).count(), 63);
+    let error = client::request_at(&service.paths, service.add(&blocked.base, "overflow.bin"))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, client::Error::Rejected(ErrorCode::Busy, _)));
+    assert_eq!(service.ready().await.jobs[0].id, s.jobs[0].id);
+    client::request_at(
+        &service.paths,
+        Request::RemoveQueued {
+            instance: initial.instance.clone(),
+            id: s.jobs[20].id,
+        },
+    )
+    .await
+    .unwrap();
+    let after = client::request_at(
+        &service.paths,
+        service.add(&blocked.base, "replacement.bin"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(after.jobs.len(), 64);
+    assert_eq!(after.jobs[0].id, s.jobs[0].id);
+    assert!(!after.jobs.iter().any(|j| j.id == s.jobs[20].id));
+    let stopping = client::request_at(
+        &service.paths,
+        Request::Shutdown {
+            instance: initial.instance,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(stopping.shutting_down);
+    assert!(!stopping.jobs.iter().any(|j| j.queued));
+    assert!(
+        stopping
+            .jobs
+            .iter()
+            .skip(1)
+            .all(|j| j.result == Some(Finished::Cancelled))
+    );
+    service.exit().await;
+    // Queued work must never touch its files, including on shutdown.
+    for n in 1..64 {
+        assert!(
+            !service
+                .root
+                .path()
+                .join(format!("downloads/file-{n}.bin.part"))
+                .exists()
+        );
+    }
+    assert!(
+        !service
+            .root
+            .path()
+            .join("downloads/replacement.bin.part")
+            .exists()
+    );
 }

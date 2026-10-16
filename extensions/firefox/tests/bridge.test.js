@@ -68,3 +68,16 @@ test("overlapping commands do not create a hidden queue", async () => {
   assert.equal(second.code,"busy"); assert.equal(f.calls.length,1);
   release({version:1,ok:true,code:"accepted"}); await first; assert.equal(f.calls.length,1);
 });
+
+test("queued acknowledgements remain queued after popup feedback restore", async () => {
+  const f = fixture(async () => ({ version: VERSION, ok: true, code: "queued", message: "secret", job_id: 7 }));
+  const reply = await f.bridge.onMessage({ type: "add", url: "https://example.com/file" }, f.sender);
+  assert.equal(reply.code, "queued");
+  assert.equal(reply.ok, true);
+  assert.ok(reply.message.includes("has not started"));
+  assert.ok(!reply.message.includes("secret"));
+  const restored = await f.bridge.onMessage({ type: "feedback" }, f.sender);
+  assert.equal(restored.code, "queued");
+  assert.equal(f.calls.length, 1);
+  assert.equal(nativeReply({version: VERSION, ok: false, code: "queued"}).code, "uncertain");
+});

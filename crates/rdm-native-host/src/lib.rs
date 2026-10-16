@@ -82,7 +82,7 @@ impl Reply {
             Error::Rejected(code, _) => match code {
                 rdm_ipc::ErrorCode::Busy => (
                     "busy",
-                    "Another download is active. Wait or cancel it in the RDM GUI.",
+                    "The RDM queue is full. Remove a queued download or wait.",
                 ),
                 rdm_ipc::ErrorCode::ShuttingDown => (
                     "stopping",
@@ -172,11 +172,20 @@ pub async fn dispatch(message: Message) -> Reply {
     .await;
     match response {
         Ok(state) => {
-            let mut reply = Reply::new(
-                true,
-                "accepted",
-                "Accepted by RDM. Open the GUI to view progress; acceptance is not completion.",
-            );
+            let queued = state.jobs.last().is_some_and(|j| j.queued);
+            let mut reply = if queued {
+                Reply::new(
+                    true,
+                    "queued",
+                    "Queued in RDM. Open the GUI for position and progress; it has not started yet.",
+                )
+            } else {
+                Reply::new(
+                    true,
+                    "accepted",
+                    "Accepted by RDM. Open the GUI to view progress; acceptance is not completion.",
+                )
+            };
             reply.job_id = state.jobs.last().map(|j| j.id);
             reply
         }
