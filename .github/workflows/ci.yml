@@ -52,3 +52,40 @@ jobs:
 
       - name: cargo test
         run: cargo test --all-targets
+
+  gui:
+    name: Iced GUI / software renderer
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config libssl-dev \
+            libxkbcommon-dev libwayland-dev libx11-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: iced-gui
+
+      - name: Format GUI
+        run: cargo fmt -p rdm-gui --check
+
+      - name: Check GUI
+        run: cargo check -p rdm-gui --all-targets --locked
+
+      - name: Lint GUI
+        run: cargo clippy -p rdm-gui --all-targets --locked -- -D warnings
+
+      - name: Test GUI adapter and state
+        run: cargo test -p rdm-gui --locked

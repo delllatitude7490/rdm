@@ -6,6 +6,23 @@
 - Written in rust so it must be cool. Emphasis on must.
 - Linux only.
 
+## Native GUI preview (Iced)
+
+An optional Rust/Iced desktop frontend is available as a separate workspace
+package. The CLI remains the default build; GUI dependencies are not added to
+the CLI package.
+
+```sh
+cargo run -p rdm-gui --release
+```
+
+This first milestone handles one direct HTTP/HTTPS file, destination selection
+by text field, progress, and cancellation. Closing cancels active work; it does
+not run downloads in the background yet. Provider links, queues, and browser
+integration are not part of this preview.
+
+See [GUI setup and limitations](crates/rdm-gui/README.md) before building.
+
 # HoW To uSe
 ```
 RDM — Rust Download Manager
