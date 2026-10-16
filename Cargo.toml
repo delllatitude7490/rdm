@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rdm-gui"]
+members = ["crates/rdm-gui", "crates/rdm-ipc", "crates/rdm-service"]
 default-members = ["."]
 resolver = "3"
 

@@ -3255,13 +3255,35 @@ dependencies = [
 name = "rdm-gui"
 version = "0.1.0"
 dependencies = [
+ "iced",
+ "rdm",
+ "rdm-ipc",
+ "tokio",
+]
+
+[[package]]
+name = "rdm-ipc"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "rdm-service"
+version = "0.1.0"
+dependencies = [
  "anyhow",
  "axum",
  "dirs",
  "futures-util",
- "iced",
  "rdm",
+ "rdm-ipc",
  "reqwest",
+ "serde_json",
  "tempfile",
  "tokio",
  "tokio-util",

@@ -6,22 +6,28 @@
 - Written in rust so it must be cool. Emphasis on must.
 - Linux only.
 
-## Native GUI preview (Iced)
+## Native GUI preview (Iced + Rust service)
 
-An optional Rust/Iced desktop frontend is available as a separate workspace
-package. The CLI remains the default build; GUI dependencies are not added to
+The optional Rust/Iced app now connects to a per-user Rust download service.
+The CLI remains the default build; GUI/service dependencies are not added to
 the CLI package.
 
 ```sh
-cargo run -p rdm-gui --release
+cargo build -p rdm-service -p rdm-gui --release
+./target/release/rdm-gui
 ```
 
-This first milestone handles one direct HTTP/HTTPS file, destination selection
-by text field, progress, and cancellation. Closing cancels active work; it does
-not run downloads in the background yet. Provider links, queues, and browser
-integration are not part of this preview.
+The GUI starts the matching service on demand. **Closing the window leaves
+managed downloads running; reopening reconnects.** Stop the service explicitly
+from the GUI or with `rdm-service --shutdown` to cancel and drain work.
 
-See [GUI setup and limitations](crates/rdm-gui/README.md) before building.
+This preview supports one direct HTTP/HTTPS managed download at a time. Records
+are bounded and in-memory, not durable history. The legacy CLI is not yet
+service-backed: avoid concurrent writes to the same destination. Provider links,
+concurrent queues, pause, and browser integration remain future milestones.
+
+See [GUI setup](crates/rdm-gui/README.md) and
+[service architecture, runtime requirements and limitations](crates/rdm-service/README.md).
 
 # HoW To uSe
 ```

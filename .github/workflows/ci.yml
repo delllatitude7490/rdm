@@ -54,7 +54,7 @@ jobs:
         run: cargo test --all-targets
 
   gui:
-    name: Iced GUI / software renderer
+    name: Native GUI / IPC / service
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -78,14 +78,14 @@ jobs:
         with:
           key: iced-gui
 
-      - name: Format GUI
-        run: cargo fmt -p rdm-gui --check
+      - name: Format native crates
+        run: cargo fmt -p rdm-gui -p rdm-ipc -p rdm-service --check
 
-      - name: Check GUI
-        run: cargo check -p rdm-gui --all-targets --locked
+      - name: Check native crates
+        run: cargo check -p rdm-gui -p rdm-ipc -p rdm-service --all-targets --locked
 
-      - name: Lint GUI
-        run: cargo clippy -p rdm-gui --all-targets --locked -- -D warnings
+      - name: Lint native crates
+        run: cargo clippy -p rdm-gui -p rdm-ipc -p rdm-service --all-targets --locked -- -D warnings
 
-      - name: Test GUI adapter and state
-        run: cargo test -p rdm-gui --locked
+      - name: Test GUI, IPC, transfer adapter and service lifecycle
+        run: cargo test -p rdm-gui -p rdm-ipc -p rdm-service --locked
