@@ -30,3 +30,5 @@ pub mod ui;
 /// should reach for `crate::hoster::mega`, and this line goes away once the
 /// existing call sites are updated.
 pub use hoster::mega;
+
+pub mod managed;

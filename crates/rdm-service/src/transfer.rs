@@ -63,6 +63,45 @@ pub fn prepare(
     filename: &str,
     connections: usize,
 ) -> Result<Input, String> {
+    prepare_options(url, directory, filename, connections, false)
+}
+
+pub fn prepare_cli(add: &rdm_ipc::AddCli) -> Result<Input, String> {
+    let path = Path::new(&add.output);
+    if !path.is_absolute() || add.output.len() > 4096 {
+        return Err("CLI destination must be an absolute file path within size limits.".into());
+    }
+    let directory = path
+        .parent()
+        .and_then(Path::to_str)
+        .ok_or("Invalid destination folder.")?;
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("Invalid destination filename.")?;
+    // Explicit output is not trimmed: reject ambiguous whitespace instead.
+    if name.trim() != name || directory.trim() != directory {
+        return Err("Destination edges must not contain whitespace.".into());
+    }
+    prepare_options(
+        &add.url,
+        directory,
+        name,
+        add.connections,
+        add.allow_private,
+    )
+}
+
+fn prepare_options(
+    url: &str,
+    directory: &str,
+    filename: &str,
+    connections: usize,
+    allow_private: bool,
+) -> Result<Input, String> {
+    if !(1..=64).contains(&connections) {
+        return Err("Connections must be between 1 and 64.".into());
+    }
     if url.len() > 16 * 1024 || directory.len() > 4096 || filename.len() > 255 {
         return Err("URL or destination exceeds the preview's size limits.".into());
     }
@@ -70,8 +109,8 @@ pub fn prepare(
     if rdm::hoster::detect(url).is_some() {
         return Err("Provider share links are not supported in this preview. Use the CLI.".into());
     }
-    let parsed = rdm::net::parse_and_validate_url(url, false).map_err(|_| {
-        "Enter a valid public HTTP/HTTPS file URL. Private networks require RDM_ALLOW_PRIVATE=1."
+    let parsed = rdm::net::parse_and_validate_url(url, allow_private).map_err(|_| {
+        "Enter a valid public HTTP/HTTPS file URL. Private networks require --allow-private or RDM_ALLOW_PRIVATE=1."
             .to_owned()
     })?;
     if !parsed.username().is_empty() || parsed.password().is_some() {
@@ -98,7 +137,8 @@ pub fn prepare(
     // file. The UI calls this 'Already exists', not 'Downloaded'. Existing valid
     // partial state still follows the engine's normal resume rules.
     let request = DownloadRequest::new(url.to_owned(), Some(output), connections)
-        .with_policy(ExistingPolicy::Reuse);
+        .with_policy(ExistingPolicy::Reuse)
+        .with_allow_private(allow_private);
     Ok(Input {
         request,
         directory,
@@ -415,5 +455,37 @@ mod tests {
         assert_eq!(result, Finished::Cancelled);
         assert!(!dir.path().join("file.bin").exists());
         assert!(dir.path().join("file.bin.part").exists());
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    #[test]
+    fn cli_options_are_validated_and_preserved() {
+        let mut add = rdm_ipc::AddCli {
+            url: "http://127.0.0.1/file.bin".into(),
+            output: "/tmp/explicit.bin".into(),
+            connections: 3,
+            allow_private: true,
+        };
+        let input = prepare_cli(&add).unwrap();
+        assert_eq!(input.request.connections, 3);
+        assert!(input.request.allow_private);
+        assert_eq!(input.request.output.as_deref(), Some("/tmp/explicit.bin"));
+        add.connections = 0;
+        assert!(prepare_cli(&add).is_err());
+        add.connections = 65;
+        assert!(prepare_cli(&add).is_err());
+        add.connections = 1;
+        for output in [
+            "relative.bin",
+            "/tmp/unsafe\\name",
+            "/tmp/unsafe\nname",
+            "/tmp/ name ",
+        ] {
+            add.output = output.into();
+            assert!(prepare_cli(&add).is_err());
+        }
     }
 }

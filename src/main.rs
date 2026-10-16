@@ -17,6 +17,9 @@ use rdm::{config, engine, mega, queue, scrape, secret_url, signal, sync};
 
 fn main() -> Result<()> {
     let args = Cli::parse();
+    if let Some(Command::Jobs { command }) = &args.command {
+        return rdm::managed::jobs(command);
+    }
     let cfg = config::Config::load()?;
     // One load per run: the engine reads retry and SFTP settings from the
     // same values, rather than re-reading (and possibly re-defaulting) them.
@@ -29,10 +32,11 @@ fn main() -> Result<()> {
                 .url
                 .as_deref()
                 .expect("clap guarantees a URL when no subcommand is given");
-            quick_download(&cfg, url, &args.opts, args.parallel)
+            quick_download(&cfg, url, &args.opts, args.parallel, args.detach)
         }
 
-        Some(Command::Download { url, opts }) => {
+        Some(Command::Download { url, opts, detach }) => {
+            reject_legacy_detach(&url, detach)?;
             if rdm::sftp::is_sftp_url(&url) {
                 return run_async(|cancel| {
                     rdm::sftp::run(
@@ -84,6 +88,16 @@ fn main() -> Result<()> {
             let connections = opts.connections.unwrap_or(cfg.connections);
             let output_path = resolve_output(opts.output.clone(), &url, &cfg);
 
+            if !directory_url(&url) {
+                return rdm::managed::download(
+                    url,
+                    output_path,
+                    connections,
+                    opts.allow_private,
+                    opts.quiet,
+                    detach,
+                );
+            }
             run_async(|cancel| async move {
                 engine::run_download(
                     url,
@@ -153,11 +167,28 @@ fn main() -> Result<()> {
 
         Some(Command::Queue { command }) => run_queue(&cfg, command),
 
+        Some(Command::Jobs { .. }) => unreachable!("handled before config loading"),
+
         Some(Command::Config) => {
             cfg.print();
             Ok(())
         }
     }
+}
+
+// Keep hoster and listing routes outside managed admission for this milestone.
+fn reject_legacy_detach(url: &str, detach: bool) -> Result<()> {
+    if detach
+        && (rdm::sftp::is_sftp_url(url) || rdm::hoster::detect(url).is_some() || directory_url(url))
+    {
+        anyhow::bail!(
+            "--detach is supported only for direct HTTP/HTTPS files, not providers, SFTP or listings."
+        );
+    }
+    Ok(())
+}
+fn directory_url(value: &str) -> bool {
+    reqwest::Url::parse(value).is_ok_and(|u| u.path().ends_with('/'))
 }
 
 // -- Command handlers ------------------------------------------------
@@ -173,7 +204,9 @@ fn quick_download(
     url: &str,
     opts: &DownloadOpts,
     parallel: Option<usize>,
+    detach: bool,
 ) -> Result<()> {
+    reject_legacy_detach(url, detach)?;
     if rdm::sftp::is_sftp_url(url) {
         return run_async(|cancel| {
             rdm::sftp::run(
@@ -243,8 +276,29 @@ fn quick_download(
     let url = engine::normalize_download_url(url);
     let connections = opts.connections.unwrap_or(cfg.connections);
     let scan_for_listing = opts.output.is_none() && looks_like_directory(&url);
+    if detach && scan_for_listing {
+        anyhow::bail!(
+            "--detach requires a direct file; use `rdm download URL --detach` for extensionless files."
+        );
+    }
+    if !scan_for_listing && !directory_url(&url) {
+        if parallel.is_some() && !opts.quiet {
+            eprintln!("-p applies only to directory listings; ignoring it for a single file.");
+        }
+        let output = resolve_output(opts.output.clone(), &url, cfg);
+        return rdm::managed::download(
+            url,
+            output,
+            connections,
+            opts.allow_private,
+            opts.quiet,
+            detach,
+        );
+    }
 
-    run_async(|cancel| async move {
+    let listing_url = url.clone();
+    let listed = run_async(|cancel| async move {
+        let url = listing_url;
         if scan_for_listing {
             // A failed scan is not fatal: fall through and treat the URL as a
             // single file, which is what it usually turns out to be.
@@ -266,7 +320,8 @@ fn quick_download(
                 })?;
 
                 let parallel = parallel.unwrap_or(cfg.queue_parallel);
-                return queue::start(cfg, cancel, parallel).await;
+                queue::start(cfg, cancel, parallel).await?;
+                return Ok(true);
             }
         }
 
@@ -276,10 +331,29 @@ fn quick_download(
             );
         }
 
-        let output_path = resolve_output(opts.output.clone(), &url, cfg);
+        if cancel.is_cancelled() {
+            anyhow::bail!("Directory discovery cancelled.");
+        }
+        Ok(false)
+    })?;
+    if listed {
+        return Ok(());
+    }
+    let output = resolve_output(opts.output.clone(), &url, cfg);
+    if !directory_url(&url) {
+        return rdm::managed::download(
+            url,
+            output,
+            connections,
+            opts.allow_private,
+            opts.quiet,
+            detach,
+        );
+    }
+    run_async(|cancel| async move {
         engine::run_download(
             url,
-            Some(output_path),
+            Some(output),
             connections,
             opts.allow_private,
             cancel,
@@ -559,7 +633,17 @@ fn dropbox_download(cfg: &config::Config, url: &str, opts: &DownloadOpts) -> Res
                 )
                 .await
             }
-            None => engine::run_download(link.url, Some(output), connections, opts.allow_private, cancel, quiet).await,
+            None => {
+                engine::run_download(
+                    link.url,
+                    Some(output),
+                    connections,
+                    opts.allow_private,
+                    cancel,
+                    quiet,
+                )
+                .await
+            }
         }
     })
 }
@@ -744,12 +828,7 @@ fn queue_add(cfg: &config::Config, url: &str, opts: &DownloadOpts) -> Result<()>
                         .map(|link| cfg.resolve_output_path(&link.fallback_name))
                 });
             let id = queue::Queue::locked(|q| {
-                Ok(q.add_with_scope(
-                    url.clone(),
-                    output,
-                    opts.connections,
-                    opts.allow_private,
-                ))
+                Ok(q.add_with_scope(url.clone(), output, opts.connections, opts.allow_private))
             })?;
             let label = if is_mega {
                 // Never echo the link back: the fragment is the decryption key.
@@ -789,10 +868,10 @@ fn queue_add(cfg: &config::Config, url: &str, opts: &DownloadOpts) -> Result<()>
 /// Builds a multi-threaded runtime, wires SIGINT/SIGTERM to a
 /// [`CancellationToken`] so in-flight downloads can checkpoint their progress,
 /// and always tears the handler down again.
-fn run_async<F, Fut>(body: F) -> Result<()>
+fn run_async<F, Fut, T>(body: F) -> Result<T>
 where
     F: FnOnce(CancellationToken) -> Fut,
-    Fut: Future<Output = Result<()>>,
+    Fut: Future<Output = Result<T>>,
 {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -1592,7 +1671,10 @@ mod tests {
         // What `print_discovered` prints now.
         let shown = ui::terminal_safe(&stored);
         assert_eq!(shown, "%1B%5B2J");
-        assert!(!shown.contains('\u{1b}'), "escaped to the terminal: {shown:?}");
+        assert!(
+            !shown.contains('\u{1b}'),
+            "escaped to the terminal: {shown:?}"
+        );
 
         // What it printed before: the second decode is the whole bug.
         let twice_decoded = engine::percent_decode(&stored);
@@ -1620,7 +1702,9 @@ mod tests {
 
         // An escape encoded in the URL stays encoded, and a live one is
         // stripped either way.
-        assert!(!ui::terminal_safe(&secret_url::redact("http://x.com/%1B%5B2Jfake")).contains('\u{1b}'));
+        assert!(
+            !ui::terminal_safe(&secret_url::redact("http://x.com/%1B%5B2Jfake")).contains('\u{1b}')
+        );
         assert!(!ui::terminal_safe("\u{1b}[2Jspoofed").contains('\u{1b}'));
     }
 }

@@ -48,8 +48,8 @@ headless sessions can set it to a freshly created private directory.
 
 ## Commands and events
 
-The `rdm-ipc` crate defines Add, List, Subscribe, Cancel and Shutdown. Traffic is
-length-prefixed JSON with an explicit protocol version and a 1 MiB frame limit.
+The `rdm-ipc` crate defines Add, AddCli, List, Subscribe, Cancel and Shutdown. Traffic is
+length-prefixed JSON with internal protocol version 2 and a 1 MiB frame limit.
 Add input has separate URL/destination length limits. Cancel/Shutdown include
 the service instance ID so stale clients cannot target reused job IDs.
 
@@ -83,9 +83,12 @@ operation can delay it; there is no unsafe forced-abort button.
   invent restored history or automatically restart downloads. Existing engine
   partial/resume files remain on disk; re-add the same URL and destination to use
   the engine's supported resume behaviour.
-- The legacy CLI and its persisted queue remain unchanged and do NOT yet use
-  this service. Do not run a legacy CLI download against the same destination
-  concurrently. Cross-interface coordination is a separate follow-up.
+- Direct HTTP/HTTPS CLI files now use this service through AddCli, with absolute
+  caller-resolved output, connection count and explicit private-network opt-in.
+  CLI, GUI and Firefox share the one-active limit and records. Provider/SFTP,
+  listings, sync and the persisted queue remain legacy paths outside coordination;
+  do not use them concurrently against the same output. See the root README for
+  CLI wait/detach, cancellation, existing-file semantics and upgrade instructions.
 - Only direct HTTP/HTTPS files. Known provider shares, directory-shaped URLs,
   SFTP and userinfo credentials are still refused. Firefox explicit link handoff
   is available through the separate `rdm-native-host` preview; see
@@ -93,7 +96,8 @@ operation can delay it; there is no unsafe forced-abort button.
 - No per-file pause, multi-download scheduler, durable history or queue controls.
 - The service loads existing config once at startup, retaining parse errors and
   existing network/file-safety rules. Restart it to apply config/environment
-  changes. For example `RDM_ALLOW_PRIVATE=1` must be set on the **service** process,
+  changes (CLI output/connections/private opt-in are explicit per-job exceptions).
+  For example `RDM_ALLOW_PRIVATE=1` must be set on the **service** process,
   not just a GUI connecting to an already running service.
 - No raw error chains, notice bodies, signed URLs or credentials in public
   snapshots or service logs. Existing engine resume files retain their existing
@@ -115,3 +119,11 @@ cancel/shutdown drain, duplicate ownership, stale socket/crash recovery,
 generation mismatch, permissions, bad frames/versions, bounded subscriptions,
 existing output protection, SIGTERM drain, 64-record eviction, and secret-safe validation. Test-only loopback access
 is set per child process, never through global environment mutation.
+
+CLI process-level coverage (matching binaries required):
+
+```sh
+cargo build -p rdm -p rdm-service -p rdm-native-host --locked
+python3 tests/cli_service_smoke.py target/debug
+python3 tests/cli_protocol_smoke.py target/debug
+```

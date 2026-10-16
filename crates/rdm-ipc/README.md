@@ -6,13 +6,16 @@ client for RDM. There is no dependency on Iced or the download engine.
 See [service architecture and limitations](../rdm-service/README.md).
 
 Wire format: a big-endian u32 byte length (1..=1 MiB), followed by a JSON
-`Packet { version, body }`. Exactly one request is sent per connection. A List,
-Add, Cancel or Shutdown receives one response; Subscribe receives an initial
+`Packet { version, body }` (internal version 2; matching Rust binaries required). Exactly one request is sent per connection. A List,
+Add, AddCli, Cancel or Shutdown receives one response; Subscribe receives an initial
 snapshot followed by snapshots until disconnect. JSON parse errors never echo
 untrusted payload text. Version mismatch is an explicit response.
 
-Public snapshots intentionally omit source URLs. Add's Debug representation
-redacts input. Treat serialized Add requests as secrets; never log raw frames.
+Public snapshots intentionally omit source URLs. Add and AddCli Debug redact
+input. Treat serialized requests as secrets; never log raw frames. AddCli carries
+CLI-resolved absolute output, connections and explicit private-network opt-in;
+GUI/browser Add continues to use service defaults. Both enter the same actor
+admission and engine path.
 
 `request_at` sends a mutation once. Failures after connecting may be ambiguous,
 so callers must not automatically retry them. `ensure_running` retries only

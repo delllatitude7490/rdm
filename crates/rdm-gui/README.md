@@ -51,11 +51,12 @@ workspace default; normal CLI-only builds do not build Iced or the service.
 Records are capped at 64 and are **not durable**. Restarting the service clears
 in-memory records; existing partial files are not automatically restarted. The
 GUI explains a detected service-instance change. A concurrent queue/history UI,
-provider/SFTP routing, graphical folder picker, pause, tray, installer, and browser
-extension remain future milestones.
+provider/SFTP routing, graphical folder picker, pause, tray and installer remain
+future milestones. Firefox explicit handoff is available separately.
 
-Do not use the legacy CLI concurrently against the same destination: it is not
-service-backed yet. See [service setup, security and limitations](../rdm-service/README.md).
+Direct HTTP/HTTPS CLI files now share this service. Provider/SFTP routes, listings,
+sync and the persisted queue still do not: avoid concurrent writes to the same
+destination from those legacy paths. See [service setup, security and limitations](../rdm-service/README.md).
 
 ## Tests and manual checks
 

@@ -6,7 +6,7 @@ pub mod wire;
 
 use serde::{Deserialize, Serialize};
 
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 pub const MAX_FRAME: usize = 1024 * 1024;
 pub const MAX_JOBS: usize = 64;
 pub type JobId = u64;
@@ -26,10 +26,25 @@ impl std::fmt::Debug for Add {
     }
 }
 
+/// CLI-resolved destination and per-invocation network options.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AddCli {
+    pub url: String,
+    pub output: String,
+    pub connections: usize,
+    pub allow_private: bool,
+}
+impl std::fmt::Debug for AddCli {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AddCli { [redacted] }")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", content = "data", rename_all = "snake_case")]
 pub enum Request {
     Add(Add),
+    AddCli(AddCli),
     List,
     Subscribe,
     Cancel { instance: String, id: JobId },
@@ -144,5 +159,19 @@ mod tests {
         let decoded: Packet<Request> = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(decoded.version, VERSION);
         assert!(matches!(decoded.body, Request::Add(_)));
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    #[test]
+    fn cli_input_debug_is_redacted() {
+        let request = super::Request::AddCli(super::AddCli {
+            url: "https://secret/file?token=secret".into(),
+            output: "/secret/file".into(),
+            connections: 1,
+            allow_private: true,
+        });
+        assert!(!format!("{request:?}").contains("secret"));
     }
 }

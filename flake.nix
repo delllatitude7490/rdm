@@ -30,6 +30,8 @@
               zlib
               libssh2
             ];
+            # The CLI needs the matching service; no Iced dependency is built.
+            cargoBuildFlags = [ "-p" "rdm" "-p" "rdm-service" ];
             doCheck = false;
             meta = {
               description = "Rust Download Manager - CLI";

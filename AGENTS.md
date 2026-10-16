@@ -18,6 +18,7 @@ The core user-facing workflows are:
   filter extensions and delete safe, verified orphans.
 - `rdm queue …`: persist, inspect, and process a download queue across
   invocations.
+- `rdm jobs list/inspect/cancel`: control shared-service direct downloads.
 - `rdm config`: print the effective configuration.
 
 Read `README.md` and the relevant file in `extraInfo/` before changing a
@@ -64,12 +65,16 @@ is explicitly the purpose of the test.
 
 ## Execution and routing model
 
-1. `main` parses `Cli`, calls `Config::load()` exactly once, and passes that
+1. `main` parses `Cli` (jobs commands bypass local config), calls `Config::load()`
+   exactly once for download/config routes, and passes that
    same configuration to the engine and command handlers.
 2. SFTP and known hosters must be identified **before** generic URL
    normalization or the directory-listing heuristic. Their share URLs are API
    handles or carry fragments/query data that generic handling can corrupt.
-3. Generic single files go through `engine`; listings are discovered by
+3. Generic direct HTTP/HTTPS CLI files submit to the per-user service, which
+   owns `engine`; default CLI waits, `--detach` returns on acceptance. The GUI,
+   Firefox and CLI share one active job. Provider/SFTP, directory-shaped fallback,
+   sync and queue paths remain legacy and uncoordinated. Listings are discovered by
    `scrape` and become queue work. `sync` chooses its own hoster/SFTP/generic
    implementation because its metadata and deletion rules differ from a
    download.

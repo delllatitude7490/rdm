@@ -9,8 +9,8 @@
 ## Native GUI preview (Iced + Rust service)
 
 The optional Rust/Iced app now connects to a per-user Rust download service.
-The CLI remains the default build; GUI/service dependencies are not added to
-the CLI package.
+The CLI remains the default build and does not depend on Iced. Direct file
+downloads now require the matching `rdm-service` binary alongside it or on PATH.
 
 ```sh
 cargo build -p rdm-service -p rdm-gui --release
@@ -22,9 +22,11 @@ managed downloads running; reopening reconnects.** Stop the service explicitly
 from the GUI or with `rdm-service --shutdown` to cancel and drain work.
 
 This preview supports one direct HTTP/HTTPS managed download at a time. Records
-are bounded and in-memory, not durable history. The legacy CLI is not yet
-service-backed: avoid concurrent writes to the same destination. Provider links,
-concurrent queues, pause, and browser integration remain future milestones.
+are bounded and in-memory, not durable history. Direct HTTP/HTTPS CLI files,
+the GUI and Firefox handoffs share admission and job state. Provider/SFTP routes,
+HTTP listings, sync and the persisted queue remain outside the service: never
+target the same output concurrently from those legacy paths. Concurrent managed
+queues and pause remain future milestones.
 
 See [GUI setup](crates/rdm-gui/README.md) and
 [service architecture, runtime requirements and limitations](crates/rdm-service/README.md).
@@ -40,6 +42,7 @@ Commands:
   download  Download a single URL [aliases: d]
   sync      Mirror a remote directory listing into a local directory
   queue     Manage the download queue [aliases: q]
+  jobs      Inspect downloads managed by the shared service (does not start it)
   config    Show the effective configuration
   help      Print this message or the help of the given subcommand(s)
 
@@ -52,6 +55,7 @@ Options:
       --allow-private     Allow scanning private, loopback and link-local addresses [aliases: --ap]
   -q, --quiet             Suppress progress output
   -p, --parallel <N>      Files to download concurrently if <URL> is a directory listing [default: queue_parallel from config]
+      --detach            Return after service acceptance (direct files only)
   -h, --help              Print help
   -V, --version           Print version
 
@@ -69,6 +73,60 @@ If you have set up the path variable like a normal person then you can reproduce
 
 `-o`, `-c`, `--allow-private` and `-q` work on every download path: bare `rdm <URL>`, `rdm download`, `rdm sync` and `rdm queue add`.
 `--ap` is a shorthand for `--allow-private`.
+
+## Shared direct-file CLI downloads
+
+Build/install the matching CLI and service together (the GUI is optional):
+
+```sh
+cargo build -p rdm -p rdm-service --release --locked
+./target/release/rdm download https://example.com/file.zip
+./target/release/rdm download https://example.com/file.zip -o another.zip --detach
+./target/release/rdm jobs list
+./target/release/rdm jobs list --json
+./target/release/rdm jobs inspect INSTANCE:ID --json
+./target/release/rdm jobs cancel INSTANCE:ID
+```
+
+- The default waits for the service's terminal result; success means completed
+  bytes, not just acceptance. `--quiet` suppresses progress, not failure exit codes.
+- `--detach` returns after acceptance, printing the full `INSTANCE:ID` handle to
+  stdout even with `--quiet`. Acceptance does **not** mean completion. Closing
+  the CLI or GUI does not stop the detached download.
+- While waiting, Ctrl+C/SIGTERM requests cancellation of **that job only**, then
+  waits for engine cleanup. A second signal stops waiting with an unknown-result
+  error, not a false cancellation confirmation. It never shuts down the service.
+- `jobs` commands do not start a stopped service, read local config or enqueue
+  anything. Cancellation acknowledgement is not proof cleanup has completed.
+- Source URLs are omitted from snapshots. JSON is machine-readable; ordinary
+  terminal rows sanitize and clip filenames/paths. Handles include the service
+  instance so old handles cannot cancel reused numeric IDs after restart.
+- `-o` and `-c` resolve against this invocation's config; relative output follows
+  the existing configured-download-directory rules, then becomes absolute in
+  the CLI's working directory. `--allow-private` / caller `RDM_ALLOW_PRIVATE=1`
+  are passed explicitly. The service's own private-network opt-in also applies.
+  Other retry, proxy and size-limit config/environment stays service-owned;
+  restart the service to apply changes. No environment is copied per request.
+- Existing completed output is left unchanged and the CLI exits nonzero asking
+  for a different `-o` path. Unlike the old interactive path, managed downloads
+  never prompt for overwrite. Valid partial state follows the engine's normal
+  resume rules: retry the same URL and output after cancellation has finished.
+- Missing service, unsafe runtime, incompatible version, Busy or lost replies
+  fail explicitly; no silent fallback to an independent worker and no automatic
+  mutation retry. Inspect before resending an uncertain command.
+- One active managed job across all clients; 64 recent in-memory records, lost
+  on service restart. This is not the persisted `rdm queue` and not a new queue.
+- Provider shares, SFTP, directory-shaped URLs, discovered listings, sync and
+  queue still use their existing routes. `--detach` is rejected for them. For
+  extensionless direct links use `rdm download URL --detach` (the bare form may
+  try listing discovery). Empty/failed discovery falls back to managed direct
+  files unless the URL is directory-shaped; those retain the legacy path.
+
+This change uses internal IPC **version 2**. Before upgrading, explicitly stop
+any old service with its matching GUI/service binary. Build CLI, service, GUI
+and Native Messaging host from the same checkout if installed; an incompatible
+service is never automatically stopped or replaced. The Firefox extension's
+external Native Messaging protocol remains version 1.
 
 ## Sync
 
@@ -183,7 +241,7 @@ Make sure you have libressl, zlib, libssh2, pkg-config and cargo installed
 ```
 git clone https://github.com/MasterZack69/rdm
 cd rdm
-cargo build --release
+cargo build -p rdm -p rdm-service --release --locked
 ```
 
 # Credits
@@ -209,7 +267,7 @@ RDM through a small Rust Native Messaging host. No webview, React, localhost
 server, automatic interception or browsing-history access.
 
 ```sh
-cargo build -p rdm-service -p rdm-gui -p rdm-native-host --release --locked
+cargo build -p rdm -p rdm-service -p rdm-gui -p rdm-native-host --release --locked
 ./target/release/rdm-native-host --install
 ```
 
@@ -219,4 +277,5 @@ Then load `extensions/firefox/manifest.json` as a temporary add-on from
 required; the extension is unsigned and not an AMO release. See the
 [Firefox setup, permissions and limits](extensions/firefox/README.md) and
 [native host protocol](crates/rdm-native-host/README.md). Existing single-managed-
-download, service-history and legacy-CLI coordination limits still apply.
+download and in-memory history limits still apply. Provider/SFTP/listing/sync/queue
+routes remain outside service coordination.
