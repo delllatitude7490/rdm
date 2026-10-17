@@ -556,3 +556,11 @@ fn service_queue_removal_uses_full_handles_not_legacy_numeric_ids() {
     assert!(Cli::try_parse_from(["rdm", "queue", "remove", "7"]).is_ok());
     assert!(Cli::try_parse_from(["rdm", "queue", "remove", "123-456:7"]).is_err());
 }
+
+#[test]
+fn managed_retry_and_resume_require_instance_handles() {
+    for command in ["retry", "resume"] {
+        assert!(Cli::try_parse_from(["rdm", "jobs", command, "123-456:7"]).is_ok());
+        assert!(Cli::try_parse_from(["rdm", "jobs", command, "7"]).is_err());
+    }
+}

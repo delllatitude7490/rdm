@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "RDM — Download quietly",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Send a chosen file link to your local Rust Download Manager.",
   "browser_specific_settings": {
     "gecko": {

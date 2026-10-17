@@ -38,7 +38,7 @@ async fn run() -> Result<(), ()> {
                 }
                 Err(_) => {
                     eprintln!(
-                        "RDM service could not run. Check private runtime paths, permissions, and configuration."
+                        "RDM service could not run. Check private runtime/state paths, permissions, state integrity, and configuration."
                     );
                     Err(())
                 }

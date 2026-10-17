@@ -50,8 +50,8 @@ errors. Browser-origin requests cannot register/unregister the host.
   `accepted` means admitted to the running slot; `queued` means accepted into
   the shared FIFO but not yet started. Neither confirms completion. A full
   bounded queue returns `busy`; the host does not queue locally or retry.
-  External protocol stays version 1; use extension 0.2.0 with matching Rust IPC
-  version-3 binaries so queued replies are recognized.
+  External protocol stays version 1; use extension 0.3.0 with matching Rust IPC
+  version-4 binaries so queued replies are recognized.
 - Uncertain command outcomes are reported, never automatically retried. An IPC
   rejection's arbitrary message is not forwarded into the browser.
 - Firefox's passed add-on ID must match `rdm@delllatitude7490`. Registration lists

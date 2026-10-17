@@ -139,6 +139,8 @@ fn actual_host_frames_translate_url_only_and_never_retry_mutations() {
                         destination: "/tmp/service-default/file".into(),
                         progress: Default::default(),
                         queued: mode == "queued",
+                        retryable: false,
+                        retried_as: None,
                         cancelling: false,
                         result: None,
                     });

@@ -48,10 +48,10 @@ headless sessions can set it to a freshly created private directory.
 
 ## Commands and events
 
-The `rdm-ipc` crate defines Add, AddCli, List, Subscribe, Cancel, RemoveQueued
-and Shutdown. Traffic is length-prefixed JSON with internal protocol version 3
+The `rdm-ipc` crate defines Add, AddCli, List, Subscribe, Cancel, RemoveQueued, Retry
+and Shutdown. Traffic is length-prefixed JSON with internal protocol version 4
 and a 1 MiB frame limit.
-Add input has separate URL/destination length limits. Cancel/RemoveQueued/Shutdown include
+Add input has separate URL/destination length limits. Cancel/RemoveQueued/Retry/Shutdown include
 the service instance ID so stale clients cannot target reused job IDs.
 
 Each subscription starts with a complete snapshot, then receives coalesced
@@ -80,19 +80,24 @@ operation can delay it; there is no unsafe forced-abort button.
   no network/filesystem operations until promoted. The actor starts the next
   worker only after joining the previous one, including cancellation cleanup.
   This prevents simultaneous managed writes even through aliases or server names.
-- At most 64 total records, in memory only; oldest terminal records are evicted.
-  Unfinished records are never evicted. At 64 unfinished jobs, new Adds get Busy
+- At most 64 total records, persisted in SQLite; oldest terminal records are evicted
+  except held Interrupted work, which is never silently evicted.
+  Unfinished records are never evicted. At 64 unfinished/held jobs, new Adds get Busy
   with queue-full feedback. Cancelling/removing a queued item frees capacity; its
   cancelled history record remains until ordinary terminal eviction.
 - Cancel targets queued or running jobs. RemoveQueued is queued-only, rejecting
   a promotion race; it never unexpectedly cancels a running job. Both are
-  instance-qualified and never automatically retried. Shutdown discards all
-  queued inputs, publishes their cancelled results and drains the running worker.
-  Reopening the GUI reconnects to these records while the same service lives.
-- A service restart creates a new instance and an empty record list. It does not
-  invent restored history or automatically restart downloads. Existing engine
-  partial/resume files remain on disk; re-add the same URL and destination to use
-  the engine's supported resume behaviour.
+  instance-qualified and never automatically retried. Shutdown cancels all
+  queued work, retains private retry input, and drains the running worker.
+  Reopening the GUI reconnects to these records, including after restart.
+- A service restart creates a new instance but restores records and ID allocation.
+  Every unfinished record is held as Interrupted, without HEAD/GET/output work.
+  Explicit Retry revalidates current policy and creates a new ID at the FIFO
+  tail, including at capacity; duplicate retry while active is rejected. Other
+  held work remains idle. RemoveQueued/Cancel can dismiss held Interrupted work
+  into cancelled history. Current instance-qualified handles remain mandatory.
+  Existing engine partial/resume files are authoritative, never stored offsets.
+  Resume/retry is not forced overwrite or a promise of byte-range continuation.
 - Direct HTTP/HTTPS CLI files now use this service through AddCli, with absolute
   caller-resolved output, connection count and explicit private-network opt-in.
   CLI, GUI and Firefox share the one-active limit and records. Provider/SFTP,
@@ -103,7 +108,7 @@ operation can delay it; there is no unsafe forced-abort button.
   SFTP and userinfo credentials are still refused. Firefox explicit link handoff
   is available through the separate `rdm-native-host` preview; see
   [Firefox setup](../../extensions/firefox/README.md).
-- No parallel managed downloads, per-file pause, durable queue/history or replay.
+- No parallel managed downloads, per-file pause or automatic network replay.
   The existing persisted CLI queue remains separate; no automatic import or
   migration of provider/listing/sync workflows is performed.
 - The service loads existing config once at startup, retaining parse errors and
@@ -113,7 +118,39 @@ operation can delay it; there is no unsafe forced-abort button.
   not just a GUI connecting to an already running service.
 - No raw error chains, notice bodies, signed URLs or credentials in public
   snapshots or service logs. Existing engine resume files retain their existing
-  protection model. The service adds no separate URL/history persistence.
+  protection model. Pending and retryable jobs retain URLs in private local SQLite (not encryption).
+
+## Durable state
+
+Storage: `$XDG_STATE_HOME/rdm/service/jobs.sqlite3`, default
+`~/.local/state/rdm/service/jobs.sqlite3`. Private service/rdm directories (0700),
+DB and lock (0600); symlinks, hardlinked/shared files and unsafe paths are refused.
+A second lifetime lock in the durable directory prevents services using different
+runtime directories from opening the same state. No legacy queue import occurs.
+
+SQLite is bundled into the service only, with schema version 1, DELETE journal
+and synchronous FULL transactions. A bounded complete image is committed before
+ACK, promotion/engine creation, cancellation publication or terminal publication.
+SQLite/fsync work uses Tokio's blocking pool, not reactor workers. Progress is
+coalesced in memory and saved on state transitions, not every tick. Recovery
+never trusts a saved offset over the engine's resume validation.
+
+Corrupt/unknown schemas or unsafe files cause startup failure without reset.
+Mutation commit errors fail closed: no success ACK or further scheduling,
+existing workers are cancelled/drained, and the last committed image is left for
+conservative recovery. A committed Add with a lost reply remains ambiguous; do
+not resubmit without inspection. A file may finish just before a crash without
+its result being committed; explicit retry then protects existing output and
+reports AlreadyPresent rather than inventing completion.
+
+URLs (including signatures) are stored in plaintext locally for pending and
+retryable jobs, never public snapshots/logs. Success drops URL input; bounded
+terminal eviction drops old inputs. Do not share state files/backups. Permissions
+are an OS-user boundary, not encryption or protection from same-user processes.
+Retryable history remains bounded, not an indefinite archive of every attempt.
+Stop the previous service using its matching binary BEFORE upgrading; rebuild
+all installed Rust clients/service/native host together (IPC v4), and reload
+Firefox extension 0.3.0. The extension's external protocol stays v1.
 
 ## Validation
 
@@ -139,4 +176,13 @@ cargo build -p rdm -p rdm-service -p rdm-native-host --locked
 python3 tests/cli_service_smoke.py target/debug
 python3 tests/cli_protocol_smoke.py target/debug
 python3 tests/service_queue_smoke.py target/debug
+python3 tests/service_persistence_smoke.py target/debug
 ```
+
+Crash-resume regression: segmented range counters previously included data still
+in BufWriter. Range checkpoints now publish only after flush + sync_data, batched
+at most twice per second plus terminal cleanup; failed flush/sync cannot advance
+them. On range failure/cancellation, sibling ranges and progress/autosave helpers
+are cancelled/drained before returning, and a final validated checkpoint is saved.
+This prevents an old autosaver racing a retry. It prevents new bad checkpoints;
+it does not repair partial files already corrupted by older versions.

@@ -65,10 +65,11 @@ not an AMO-ready signed XPI.
   history scanning, page-wide access, shutdown or remote filesystem control.
 - If the bridge/reply disappears, the transfer may already have been accepted.
   **Inspect the GUI before retrying.** No automatic mutation retry is performed.
-- Service recent history is in-memory only; service restart does not restore it.
+- Service queue/history is persisted privately; unfinished recovery waits for
+  explicit Resume / retry in the GUI or CLI.
   Direct HTTP/HTTPS CLI files share this service. Provider/SFTP, listings, sync
   and persisted queue routes remain outside coordination: do not use those
-  against the same destination concurrently. Parallel transfers and durable service queue/history are future work.
+  against the same destination concurrently. Parallel transfers remain future work.
 
 ## Permissions and privacy
 
@@ -128,6 +129,9 @@ This does not stop an already running service or remove downloads/configuration.
 Use the GUI's explicit service stop, or `rdm-service --shutdown`, if desired.
 
 Queue upgrade: stop an old service with its matching binary before rebuilding.
-Build matching Rust binaries (internal IPC v3) and reload this extension (0.2.0).
+Build matching Rust binaries (internal IPC v4) and reload this extension (0.3.0).
 The external Native Messaging framing/protocol remains v1. Queue and history
-are in memory only; a service restart loses pending work and does not replay it.
+survive service restart; unfinished work is held Interrupted until explicit retry.
+The local Rust service stores retry URLs (including query tokens) in owner-only
+plaintext SQLite under XDG_STATE_HOME/rdm/service, not extension storage.
+Successful records drop their URLs; bounded terminal eviction removes old input.

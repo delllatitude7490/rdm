@@ -53,7 +53,7 @@ with tempfile.TemporaryDirectory(prefix='rdm-cli-test-') as name:
     # A relative configured directory MUST resolve in the CLI's cwd, not the daemon's.
     text = 'connections = 1\ndownload_dir = "downloads"\nmax_retries = 0\nqueue_parallel = 1\n'
     config_file.write_text(text)
-    env = dict(os.environ, HOME=str(root), XDG_RUNTIME_DIR=str(runtime), XDG_CONFIG_HOME=str(root / 'config'))
+    env = dict(os.environ, HOME=str(root), XDG_RUNTIME_DIR=str(runtime), XDG_STATE_HOME=str(root / "state"), XDG_CONFIG_HOME=str(root / 'config'))
     for key in ('RDM_ALLOW_PRIVATE', 'RDM_ALLOW_PROXY', 'RDM_MAX_FILE_BYTES'): env.pop(key, None)
     sock = runtime / 'rdm/service.sock'
     children = []
@@ -66,7 +66,7 @@ with tempfile.TemporaryDirectory(prefix='rdm-cli-test-') as name:
         with socket.socket(socket.AF_UNIX) as stream:
             stream.settimeout(8)
             stream.connect(str(sock))
-            data = json.dumps({'version': 3, 'body': command}).encode()
+            data = json.dumps({'version': 4, 'body': command}).encode()
             stream.sendall(struct.pack('>I', len(data)) + data)
             size = struct.unpack('>I', receive(stream, 4))[0]
             return json.loads(receive(stream, size))['body']
