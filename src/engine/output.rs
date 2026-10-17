@@ -7,8 +7,9 @@ use super::url::extract_filename_from_url;
 
 /// Decides what to do about an already-existing output file.
 ///
-/// A resumable download (a `.part` file, or valid `.rdm` metadata) always wins
-/// over the policy — there is nothing to ask about, we just continue.
+/// Reuse always protects an existing final path, even beside valid partials.
+/// Without a final file, resumable state continues normally. Interactive and
+/// explicit overwrite paths retain their existing resume behavior.
 pub async fn resolve_existing_output(
     path: &str,
     url: &str,
@@ -17,6 +18,11 @@ pub async fn resolve_existing_output(
 ) -> Result<OutputDecision> {
     use std::io::{BufRead, IsTerminal, Write};
 
+    // A final file may have appeared while this job was paused. A sibling
+    // partial/manifest is not authorization to replace it (nor a symlink).
+    if policy == ExistingPolicy::Reuse && std::fs::symlink_metadata(path).is_ok() {
+        return Ok(OutputDecision::AlreadyPresent);
+    }
     if !std::path::Path::new(path).exists() {
         return Ok(OutputDecision::Use(path.to_owned()));
     }
@@ -202,7 +208,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_partial_download_resumes_regardless_of_policy() {
+    async fn reuse_protects_a_final_file_even_with_a_partial() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("half.bin");
         std::fs::write(&path, b"old").unwrap();
@@ -218,7 +224,25 @@ mod tests {
             )
             .await
             .unwrap(),
-            OutputDecision::Use(path),
+            OutputDecision::AlreadyPresent,
+        );
+    }
+    #[tokio::test]
+    async fn reuse_resumes_partials_only_when_no_final_output_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("half.bin");
+        std::fs::write(dir.path().join("half.bin.part"), b"partial").unwrap();
+        let path = path.to_string_lossy().to_string();
+        assert_eq!(
+            resolve_existing_output(
+                &path,
+                "https://example.com/half.bin",
+                None,
+                ExistingPolicy::Reuse
+            )
+            .await
+            .unwrap(),
+            OutputDecision::Use(path)
         );
     }
 }

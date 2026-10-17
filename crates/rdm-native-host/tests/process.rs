@@ -141,6 +141,7 @@ fn actual_host_frames_translate_url_only_and_never_retry_mutations() {
                         queued: mode == "queued",
                         retryable: false,
                         retried_as: None,
+                        pausing: false,
                         cancelling: false,
                         result: None,
                     });

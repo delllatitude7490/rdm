@@ -135,19 +135,24 @@ impl Store {
                 if tables != 0 { return Err(invalid()); }
                 let image = Image { next_id: 1, records: vec![] };
                 let tx = connection.transaction().map_err(db_error)?;
-                tx.execute_batch("CREATE TABLE state (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL); PRAGMA user_version=1;").map_err(db_error)?;
+                tx.execute_batch("CREATE TABLE state (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL); PRAGMA user_version=2;").map_err(db_error)?;
                 tx.execute("INSERT INTO state VALUES (1, ?1)", [serde_json::to_string(&image).map_err(|_| invalid())?]).map_err(db_error)?;
                 tx.commit().map_err(db_error)?;
                 // Persist newly created directory entries, too.
                 File::open(&path)?.sync_all()?;
                 if let Some(parent) = path.parent() { File::open(parent)?.sync_all()?; }
                 image
-            } else if version == 1 {
+            } else if version == 1 || version == 2 {
                 let payload: String = connection.query_row("SELECT payload FROM state WHERE id=1", [], |r| r.get(0)).map_err(db_error)?;
                 if payload.len() > 4 * 1024 * 1024 { return Err(invalid()); }
                 serde_json::from_str::<Image>(&payload).map_err(|_| invalid())?
             } else { return Err(invalid()); };
             validate(&image)?;
+            if version == 1 {
+                // Schema 1 has the same image layout, without pause intent.
+                // Validate before migration; older services must refuse Paused.
+                connection.execute_batch("BEGIN IMMEDIATE; PRAGMA user_version=2; COMMIT;").map_err(db_error)?;
+            }
             Ok((Self(Arc::new(Mutex::new(Database { connection, _lock: lock }))), image))
         }).await.map_err(|_| invalid())?
     }
@@ -187,6 +192,10 @@ fn validate(image: &Image) -> io::Result<()> {
             || r.job
                 .retried_as
                 .is_some_and(|id| id <= r.job.id || id >= image.next_id)
+            || (r.job.pausing && (!r.job.running() || r.job.cancelling))
+            || (r.job.result == Some(Finished::Paused)
+                && r.input.is_none()
+                && r.job.retried_as.is_none())
             || (r.job.queued && !r.job.active())
             || (r.job.retryable != (r.input.is_some() && !r.job.active()))
             || (matches!(
@@ -224,6 +233,7 @@ mod tests {
                     queued: true,
                     retryable: false,
                     retried_as: None,
+                    pausing: false,
                     cancelling: false,
                     result: None,
                 },
@@ -337,6 +347,70 @@ mod tests {
                 .unwrap()
                 .url
                 .contains("DO_NOT_LEAK")
+        );
+    }
+    #[tokio::test]
+    async fn schema_one_migration_preserves_inputs_and_defaults_pause_intent() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("rdm/service");
+        let (store, _) = Store::open(path.clone()).await.unwrap();
+        store.save(image()).await.unwrap();
+        drop(store);
+        let db = path.join("jobs.sqlite3");
+        let con = Connection::open(&db).unwrap();
+        let mut old = serde_json::to_value(image()).unwrap();
+        old["records"][0]["job"]
+            .as_object_mut()
+            .unwrap()
+            .remove("pausing");
+        con.execute("UPDATE state SET payload=?1 WHERE id=1", [old.to_string()])
+            .unwrap();
+        con.execute_batch("PRAGMA user_version=1").unwrap();
+        drop(con);
+        let (store, loaded) = Store::open(path).await.unwrap();
+        assert_eq!(loaded.next_id, 2);
+        assert!(!loaded.records[0].job.pausing);
+        assert!(
+            loaded.records[0]
+                .input
+                .as_ref()
+                .unwrap()
+                .url
+                .contains("DO_NOT_LEAK")
+        );
+        assert_eq!(
+            store
+                .0
+                .lock()
+                .unwrap()
+                .connection
+                .query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
+                .unwrap(),
+            2
+        );
+    }
+    #[test]
+    fn invalid_pause_combinations_are_rejected() {
+        let mut state = image();
+        state.records[0].job.pausing = true;
+        assert!(
+            validate(&state).is_err(),
+            "queued jobs have no draining worker"
+        );
+        state.records[0].job.queued = false;
+        assert!(validate(&state).is_ok());
+        state.records[0].job.cancelling = true;
+        assert!(validate(&state).is_err());
+        state.records[0].job.cancelling = false;
+        state.records[0].job.pausing = false;
+        state.records[0].job.result = Some(Finished::Paused);
+        state.records[0].job.retryable = true;
+        assert!(validate(&state).is_ok());
+        state.records[0].input = None;
+        state.records[0].job.retryable = false;
+        assert!(
+            validate(&state).is_err(),
+            "held pause must retain its input"
         );
     }
 }

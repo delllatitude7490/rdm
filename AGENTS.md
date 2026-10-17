@@ -18,7 +18,7 @@ The core user-facing workflows are:
   filter extensions and delete safe, verified orphans.
 - `rdm queue …`: persist, inspect, and process a download queue across
   invocations.
-- `rdm jobs list/inspect/cancel/remove/retry`: control shared-service direct downloads.
+- `rdm jobs list/inspect/pause/resume/cancel/remove/retry`: control shared-service direct downloads.
 - `rdm config`: print the effective configuration.
 
 Read `README.md` and the relevant file in `extraInfo/` before changing a
@@ -75,7 +75,7 @@ is explicitly the purpose of the test.
    owns `engine`; default CLI waits, `--detach` returns on acceptance. The GUI,
    Firefox and CLI share one running worker and a bounded durable FIFO. Queued
    inputs do no network/file work before promotion; unfinished recovery is held as
-   Interrupted until explicit retry; only terminal records other than held Interrupted work may
+   Interrupted until explicit retry; only terminal records other than held Paused/Interrupted work may
    be evicted. Cancellation must drain the worker before advancing. Provider/SFTP, directory-shaped fallback,
    sync and queue paths remain legacy and uncoordinated. Listings are discovered by
    `scrape` and become queue work. `sync` chooses its own hoster/SFTP/generic
@@ -196,7 +196,11 @@ and durable cross-runtime lock. All SQLite/fsync work is off Tokio workers.
 Commit admission/promotion/results before acknowledgement/publication or engine
 start. Write errors stop admission, cancel/drain workers, and preserve the last
 committed image; never silently recreate corrupt/unknown schemas.
-Recovery creates no engine: unfinished jobs become Interrupted. Explicit Retry
+Recovery creates no engine: unfinished jobs become Interrupted, except durable
+pause intent becomes Paused and existing holds stay held. Persist pause intent
+before signalling; publish Paused only after joining/draining the worker. Never
+evict held Paused/Interrupted work. Only explicit Cancel may override pause intent;
+a racing actual completion/failure must not be relabelled Paused. Explicit Retry
 revalidates current policy and creates a new ID at the tail, retaining the
 stored output/connections/private opt-in. Never replay ambient credentials or
 weaken overwrite/resume rules. Successful history must drop URL-bearing input.

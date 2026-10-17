@@ -101,7 +101,9 @@ impl Manager {
                 managed.job.result = Some(Finished::Cancelled);
                 managed.job.retryable = managed.input.is_some();
             } else if managed.job.running() {
-                managed.job.cancelling = true;
+                if !managed.job.pausing {
+                    managed.job.cancelling = true;
+                }
                 managed.cancel.cancel();
             }
         }
@@ -125,6 +127,14 @@ impl Manager {
         events: &watch::Sender<Snapshot>,
     ) -> io::Result<()> {
         if let Some(managed) = self.jobs.iter_mut().find(|m| m.job.id == id) {
+            // Only a cancelled, fully joined worker confirms a pause. A racing
+            // completion/failure remains truthful rather than being relabelled.
+            let result = if managed.job.pausing && result == Finished::Cancelled {
+                Finished::Paused
+            } else {
+                result
+            };
+            managed.job.pausing = false;
             managed.job.progress = managed.sink.snapshot();
             if let Finished::Completed { bytes, .. } = &result {
                 managed.job.progress.downloaded = *bytes;
@@ -157,12 +167,14 @@ impl Manager {
             return Ok(error(ErrorCode::Internal, "Job ID limit reached."));
         };
         if self.jobs.len() >= MAX_JOBS {
-            let Some(index) = self.jobs.iter().position(|m| {
-                !m.job.active() && !(m.job.result == Some(Finished::Interrupted) && m.job.retryable)
-            }) else {
+            let Some(index) = self
+                .jobs
+                .iter()
+                .position(|m| !m.job.active() && !m.job.held())
+            else {
                 return Ok(error(
                     ErrorCode::Busy,
-                    "The service queue is full (64 unfinished or interrupted jobs). Remove a waiting job or retry interrupted work.",
+                    "The service queue is full (64 unfinished or held jobs). Remove a waiting job or resume held work.",
                 ));
             };
             self.jobs.remove(index);
@@ -184,6 +196,7 @@ impl Manager {
                 queued: true,
                 retryable: false,
                 retried_as: None,
+                pausing: false,
                 cancelling: false,
                 result: None,
             },
@@ -294,7 +307,7 @@ impl Manager {
                 if !managed.job.retryable {
                     return Ok(error(
                         ErrorCode::Invalid,
-                        "Only interrupted, cancelled or failed jobs can be retried.",
+                        "Only paused, interrupted, cancelled or failed jobs can be resumed/retried.",
                     ));
                 }
                 // Revalidate under CURRENT network policy; never replay old env.
@@ -326,6 +339,52 @@ impl Manager {
                 managed.job.retried_as = Some(next);
                 self.add_input(input, workers, events).await
             }
+            Request::Pause { instance, id } => {
+                if instance != self.instance {
+                    return Ok(error(
+                        ErrorCode::StaleInstance,
+                        "The service restarted. Reconnect before issuing commands.",
+                    ));
+                }
+                if self.stopping {
+                    return Ok(error(
+                        ErrorCode::ShuttingDown,
+                        "The service is shutting down.",
+                    ));
+                }
+                let Some(managed) = self.jobs.iter_mut().find(|m| m.job.id == id) else {
+                    return Ok(error(
+                        ErrorCode::NotFound,
+                        "That download is no longer retained.",
+                    ));
+                };
+                if managed.job.pausing
+                    || (managed.job.result == Some(Finished::Paused) && managed.job.retryable)
+                {
+                    return Ok(Response::Snapshot(self.snapshot()));
+                }
+                if !managed.job.active() || managed.job.cancelling {
+                    return Ok(error(
+                        ErrorCode::Invalid,
+                        "Only running or queued downloads can be paused; cancellation cannot be undone.",
+                    ));
+                }
+                if managed.job.queued {
+                    // No worker or output exists for this job, so holding it is immediate.
+                    managed.job.queued = false;
+                    managed.job.result = Some(Finished::Paused);
+                    managed.job.retryable = true;
+                } else {
+                    managed.job.pausing = true;
+                }
+                let cancel = managed.cancel.clone();
+                // Commit intent BEFORE signalling. On crash, recovery holds this
+                // job as Paused even if the final drain acknowledgement was lost.
+                self.persist().await?;
+                cancel.cancel();
+                self.publish(events);
+                Ok(Response::Snapshot(self.snapshot()))
+            }
             request @ (Request::Cancel { .. } | Request::RemoveQueued { .. }) => {
                 let queued_only = matches!(request, Request::RemoveQueued { .. });
                 let (Request::Cancel { instance, id } | Request::RemoveQueued { instance, id }) =
@@ -345,20 +404,18 @@ impl Manager {
                         "That download is no longer retained.",
                     ));
                 };
-                if queued_only
-                    && !managed.job.queued
-                    && managed.job.result != Some(Finished::Interrupted)
-                {
+                if queued_only && !managed.job.queued && !managed.job.held() {
                     return Ok(error(
                         ErrorCode::Invalid,
-                        "Only queued or interrupted jobs can be removed. Use cancel for a running download.",
+                        "Only queued, paused or interrupted jobs can be removed. Use cancel for a running download.",
                     ));
                 }
-                if managed.job.queued || managed.job.result == Some(Finished::Interrupted) {
+                if managed.job.queued || managed.job.held() {
                     managed.job.queued = false;
                     managed.job.result = Some(Finished::Cancelled);
                     managed.job.retryable = managed.input.is_some();
                 } else if managed.job.running() {
+                    managed.job.pausing = false;
                     managed.job.cancelling = true;
                     managed.cancel.cancel();
                 }
@@ -456,7 +513,12 @@ pub async fn serve(
         if record.job.active() {
             record.job.queued = false;
             record.job.cancelling = false;
-            record.job.result = Some(Finished::Interrupted);
+            record.job.result = Some(if record.job.pausing {
+                Finished::Paused
+            } else {
+                Finished::Interrupted
+            });
+            record.job.pausing = false;
             record.job.retryable = record.input.is_some();
         }
     }
@@ -564,5 +626,97 @@ pub async fn serve(
     match accept_error {
         Some(e) => Err(e),
         None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod pause_tests {
+    use super::*;
+    async fn manager() -> (tempfile::TempDir, Manager, watch::Sender<Snapshot>) {
+        let root = tempfile::tempdir().unwrap();
+        let (store, _) = Store::open(root.path().join("rdm/service")).await.unwrap();
+        let manager = Manager {
+            config: Config::default(),
+            instance: "test".into(),
+            revision: 0,
+            next_id: 2,
+            stopping: false,
+            failed: false,
+            store,
+            jobs: VecDeque::from([Managed {
+                job: Job {
+                    id: 1,
+                    label: "file.bin".into(),
+                    destination: "/tmp/file.bin".into(),
+                    progress: Default::default(),
+                    queued: false,
+                    retryable: false,
+                    retried_as: None,
+                    pausing: true,
+                    cancelling: false,
+                    result: None,
+                },
+                sink: GuiSink::default(),
+                cancel: CancellationToken::new(),
+                input: Some(rdm_ipc::AddCli {
+                    url: "https://example.com/file.bin".into(),
+                    output: "/tmp/file.bin".into(),
+                    connections: 1,
+                    allow_private: false,
+                }),
+            }]),
+        };
+        let (events, _) = watch::channel(manager.snapshot());
+        (root, manager, events)
+    }
+    #[tokio::test]
+    async fn pause_only_wins_after_drained_cancellation_not_completion_or_failure() {
+        for outcome in [
+            Finished::Cancelled,
+            Finished::Completed {
+                path: "/tmp/file.bin".into(),
+                bytes: 17,
+            },
+            Finished::AlreadyPresent {
+                path: "/tmp/file.bin".into(),
+            },
+            Finished::Failed("network failure".into()),
+        ] {
+            let (_root, mut m, events) = manager().await;
+            let expected = if outcome == Finished::Cancelled {
+                Finished::Paused
+            } else {
+                outcome.clone()
+            };
+            m.finish(1, outcome, &events).await.unwrap();
+            assert_eq!(m.jobs[0].job.result, Some(expected));
+            assert!(!m.jobs[0].job.pausing);
+            assert!(!m.jobs[0].job.cancelling);
+            assert_eq!(m.jobs[0].job.retryable, m.jobs[0].input.is_some());
+        }
+    }
+    #[tokio::test]
+    async fn shutdown_preserves_pause_but_explicit_cancel_overrides_it() {
+        let (_root, mut m, events) = manager().await;
+        m.stop(&events).await.unwrap();
+        assert!(m.jobs[0].job.pausing);
+        assert!(!m.jobs[0].job.cancelling);
+        m.finish(1, Finished::Cancelled, &events).await.unwrap();
+        assert_eq!(m.jobs[0].job.result, Some(Finished::Paused));
+        let (_root, mut m, events) = manager().await;
+        m.command(
+            Request::Cancel {
+                instance: "test".into(),
+                id: 1,
+            },
+            &mut JoinSet::new(),
+            &events,
+        )
+        .await
+        .unwrap();
+        assert!(!m.jobs[0].job.pausing);
+        assert!(m.jobs[0].job.cancelling);
+        m.finish(1, Finished::Cancelled, &events).await.unwrap();
+        assert_eq!(m.jobs[0].job.result, Some(Finished::Cancelled));
     }
 }

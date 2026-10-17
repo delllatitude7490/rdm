@@ -26,7 +26,7 @@ further submissions FIFO. Queue and history are bounded and persisted privately 
 the GUI and Firefox handoffs share admission and job state. Provider/SFTP routes,
 HTTP listings, sync and the persisted queue remain outside the service: never
 target the same output concurrently from those legacy paths. Parallel managed
-transfers and pause remain future milestones.
+transfers remain future milestones. Native Pause/Resume is available for shared-service direct downloads.
 
 See [GUI setup](crates/rdm-gui/README.md) and
 [service architecture, runtime requirements and limitations](crates/rdm-service/README.md).
@@ -85,6 +85,8 @@ cargo build -p rdm -p rdm-service --release --locked
 ./target/release/rdm jobs list
 ./target/release/rdm jobs list --json
 ./target/release/rdm jobs inspect INSTANCE:ID --json
+./target/release/rdm jobs pause INSTANCE:ID
+./target/release/rdm jobs resume INSTANCE:ID
 ./target/release/rdm jobs cancel INSTANCE:ID
 ./target/release/rdm jobs remove INSTANCE:ID
 ./target/release/rdm jobs retry INSTANCE:ID
@@ -99,8 +101,9 @@ cargo build -p rdm -p rdm-service --release --locked
 - While waiting, Ctrl+C/SIGTERM requests cancellation of **that job only**, then
   waits for engine cleanup. A second signal stops waiting with an unknown-result
   error, not a false cancellation confirmation. It never shuts down the service.
-- `jobs` commands do not start a stopped service, read local config or enqueue
-  anything. Cancellation acknowledgement is not proof cleanup has completed.
+- `jobs` commands do not start a stopped service or read local config. Retry/resume
+  explicitly enqueues a new attempt; list/inspect are read-only. Cancellation or
+  pause-request acknowledgement is not proof cleanup has completed.
 - Source URLs are omitted from snapshots. JSON is machine-readable; ordinary
   terminal rows sanitize and clip filenames/paths. Handles include the service
   instance so old handles cannot cancel reused numeric IDs after restart.
@@ -119,11 +122,11 @@ cargo build -p rdm -p rdm-service --release --locked
   mutation retry. Inspect before resending an uncertain command.
 - One running managed job across all clients; further validated submissions join
   the service-owned FIFO queue. At most 64 records total (running + queued +
-  finished); terminal history (excluding held Interrupted jobs) is evicted first. If all 64 are unfinished/held, new
+  finished); terminal history (excluding held Paused/Interrupted jobs) is evicted first. If all 64 are unfinished/held, new
   submissions fail explicitly with queue-full feedback; no pending work is evicted.
 - `jobs list` distinguishes queued, active and finished results; `--json` includes
   the `queued` flag and FIFO record order. `jobs cancel` can cancel either a queued
-  or running job. `jobs remove` removes queued or held Interrupted jobs; a race
+  or running job. `jobs remove` removes queued or held Paused/Interrupted jobs; a race
   with promotion is rejected rather than cancelling a now-running transfer.
   Removed jobs retain a cancelled history record so attached waiters can finish
   truthfully. Once worker cleanup finishes, the next queued job starts.
@@ -132,13 +135,15 @@ cargo build -p rdm -p rdm-service --release --locked
   Shutdown cancels queued work without starting it and drains the running worker.
 - Queue and history survive restart in private service-owned SQLite. Every
   unfinished job recovers as **Interrupted**, held without network or output work.
+  Deliberately paused jobs (including committed pause intent) recover as **Paused**.
   Explicitly use **Resume / retry** in the GUI or `rdm jobs retry INSTANCE:ID`
   (`resume` alias) with a current handle from `rdm jobs list`. This creates a new attempt
   at the FIFO tail and lets the engine reuse valid partial state where
   supported; it never forces overwrite or guarantees byte-range resume.
   Completed/cancelled/failed history is restored; successful jobs cannot be retried.
-  Interrupted records are not evicted until retried or explicitly removed.
-  Shutdown cancels waiting/running work, retaining retryable cancelled history.
+  Paused/Interrupted records are not evicted until resumed/retried or explicitly removed.
+  Shutdown cancels waiting/running work, retaining retryable cancelled history;
+  held jobs stay held and an already-requested pause is allowed to drain as Paused.
   No login autostart or automatic network replay is added.
   This extends the existing service job set, not a GUI/extension-local queue.
   The older persisted `rdm queue` below is unchanged and is NOT imported, merged
@@ -150,14 +155,50 @@ cargo build -p rdm -p rdm-service --release --locked
   try listing discovery). Empty/failed discovery falls back to managed direct
   files unless the URL is directory-shaped; those retain the legacy path.
 
-This change uses internal IPC **version 4**. Before upgrading, explicitly stop
+This change uses internal IPC **version 5**. Before upgrading, explicitly stop
 any old service with its matching GUI/service binary. Build CLI, service, GUI
 and Native Messaging host from the same checkout if installed; an incompatible
 service is never automatically stopped or replaced. The Firefox extension's
 external Native Messaging protocol remains version 1. Reload the updated Firefox
 extension (0.3.0) too, for updated setup/privacy information.
-The old v3 in-memory queue cannot be imported: finish or record pending work
-before stopping the old service.
+The existing service SQLite schema 1 is validated and migrated in place to schema 2;
+job IDs, history and retry inputs are preserved. Back up the state directory while
+the service is stopped if needed (it contains private URLs). Older service binaries
+refuse schema 2; downgrading is not supported. The much older v3 in-memory queue
+cannot be imported: finish or record pending work before stopping that version.
+
+
+## Pause / Resume (shared service)
+
+Use **Pause** in Iced or `rdm jobs pause INSTANCE:ID` for running or queued direct
+HTTP/HTTPS work. Running jobs first show **Pausing safely…** (`pausing: true` in
+JSON). The service commits pause intent, signals cancellation to the engine,
+waits for every range/checkpoint task to drain, then commits **Paused**. Only then
+may the next FIFO job start. A queued job pauses immediately without network or
+output work. Repeating Pause on an already-held pause is harmless. A cancellation
+already in progress cannot be turned into a pause.
+
+Paused jobs have their own GUI section, retain valid partial files and private
+retry input, and stay paused across graceful shutdown, crash, and login/runtime
+recreation. They never resume automatically. **Resume** or `rdm jobs resume
+INSTANCE:ID` explicitly creates a **new attempt/handle at the FIFO tail**, with
+the same saved URL/destination/options, revalidated under current policy. The old
+record links to the new attempt; old handles cannot cancel it or enqueue a second
+resume. Read current handles from `rdm jobs list` after any service restart.
+
+An attached CLI waiter ends nonzero with a clear Paused message; it does not claim
+completion or automatically follow a new attempt. `jobs remove` dismisses a held
+pause into Cancelled history without deleting partials. Explicit Cancel during
+Pausing overrides the hold; shutdown itself preserves an existing pause request.
+If completion or an actual error wins the pause race, its real result is shown.
+
+Resume reuses verified partial state where the existing engine supports it. This
+is not a frozen TCP connection: a server without range support restarts from zero,
+identity changes follow existing validation, and existing completed output is
+never overwritten, including when a final file appears beside a partial or during
+inspection. A failed flush/checkpoint is reported as Failed, not a clean Paused.
+Saved byte counts are informational, not authority to append.
+No new service, webview, polling timer for idle holds, or managed parallelism is added.
 
 ## Persistent service state and privacy
 
@@ -169,7 +210,7 @@ Symlinked/shared state paths, corruption, unknown schemas and write errors fail
 closed: existing state is not silently reset and no independent worker fallback
 runs. A separate durable lock prevents two runtime directories sharing one DB.
 
-Pending/interrupted/failed/cancelled jobs retain their **source URLs in plaintext
+Pending/paused/interrupted/failed/cancelled jobs retain their **source URLs in plaintext
 on your local disk**, including any query tokens, for explicit retry. This is
 not encryption or protection against other processes running as your user.
 Successful jobs drop their source URL; bounded terminal eviction removes old

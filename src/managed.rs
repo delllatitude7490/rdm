@@ -72,11 +72,13 @@ fn print_job(instance: &str, job: &Job) {
     } else {
         match &job.result {
             None if job.queued => "queued",
+            None if job.pausing => "pausing",
             None if job.cancelling => "cancelling",
             None => "active",
             Some(Finished::Completed { .. }) => "completed",
             Some(Finished::AlreadyPresent { .. }) => "already-present",
             Some(Finished::Cancelled) => "cancelled",
+            Some(Finished::Paused) => "paused (resume required)",
             Some(Finished::Interrupted) => "interrupted (resume/retry required)",
             Some(Finished::Failed(_)) => "failed",
         }
@@ -105,6 +107,12 @@ pub fn jobs(command: &JobsCommand) -> Result<()> {
                 let s = client::request(Request::List).await.map_err(safe_error)?;
                 let j = find(&s, handle)?;
                 if *json { println!("{}", serde_json::to_string(j)?); } else { print_job(&s.instance, j); }
+            }
+            JobsCommand::Pause { handle } => {
+                let s = client::request(Request::Pause { instance: handle.instance.clone(), id: handle.id }).await.map_err(safe_error)?;
+                let j = find(&s, handle)?;
+                if j.pausing { println!("Pause requested for {handle}; inspect again for confirmed Paused state."); }
+                else { print_job(&s.instance, j); }
             }
             JobsCommand::Retry { handle } => {
                 let s = client::request(Request::Retry { instance: handle.instance.clone(), id: handle.id }).await.map_err(safe_error)?;
@@ -208,6 +216,7 @@ pub fn download(
             Finished::AlreadyPresent { .. } => bail!(
                 "Destination already exists and was left unchanged. Choose a different -o path."
             ),
+            Finished::Paused => bail!("Download paused ({handle}); use `rdm jobs resume {handle}` to create a new attempt. It will not resume automatically."),
             Finished::Interrupted => bail!("Download interrupted ({handle}); use the current handle from `rdm jobs list` to resume/retry explicitly."),
             Finished::Cancelled => bail!(
                 "Download cancelled ({handle}). Valid partial state is retained where supported."

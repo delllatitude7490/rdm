@@ -564,3 +564,20 @@ fn managed_retry_and_resume_require_instance_handles() {
         assert!(Cli::try_parse_from(["rdm", "jobs", command, "7"]).is_err());
     }
 }
+
+#[test]
+fn managed_pause_requires_an_instance_handle_and_no_download_flags() {
+    let cli = parse(&["rdm", "jobs", "pause", "123-456:7"]);
+    assert!(matches!(
+        cli.command,
+        Some(Command::Jobs {
+            command: super::JobsCommand::Pause { .. }
+        })
+    ));
+    for args in [
+        vec!["rdm", "jobs", "pause", "7"],
+        vec!["rdm", "jobs", "pause", "a:1", "--detach"],
+    ] {
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+}

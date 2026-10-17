@@ -156,11 +156,13 @@ pub enum JobsCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Hold running/queued work; Paused is confirmed only after the worker drains
+    Pause { handle: crate::managed::Handle },
     /// Request cancellation; the service drains the worker asynchronously
     Cancel { handle: crate::managed::Handle },
-    /// Remove a queued or interrupted service job (retains a cancelled history record)
+    /// Remove a queued, paused or interrupted service job (retains a cancelled history record)
     Remove { handle: crate::managed::Handle },
-    /// Requeue interrupted/cancelled/failed work; resumes valid partials where supported
+    /// Resume paused work or retry interrupted/cancelled/failed work as a new attempt
     #[command(alias = "resume")]
     Retry { handle: crate::managed::Handle },
 }

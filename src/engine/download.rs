@@ -15,7 +15,7 @@ use crate::ui::{self, ProgressSink, SlotState};
 use super::client::shared_config;
 use super::name::safe_filename;
 use super::output::{resolve_existing_output, resolve_output_path};
-use super::request::{DownloadRequest, Outcome, OutputDecision};
+use super::request::{DownloadRequest, ExistingPolicy, Outcome, OutputDecision};
 use super::streaming::{StreamIdentity, download_streaming};
 use super::url::normalize_download_url;
 
@@ -119,7 +119,7 @@ pub async fn download(
             sink.detail(&format!("Output    : {}", ui::terminal_safe(&output_path)));
             sink.total(Some(0));
             sink.state(SlotState::Finishing);
-            let result = write_empty_file(&output_path).await;
+            let result = write_empty_file(&output_path, req.policy == ExistingPolicy::Reuse).await;
             sink.finish();
             result?;
             return Ok(Outcome::Completed {
@@ -146,6 +146,7 @@ pub async fn download(
                     etag: info.etag.as_deref(),
                     last_modified: info.last_modified.as_deref(),
                 },
+                req.policy == ExistingPolicy::Reuse,
                 cancel,
                 Arc::clone(&sink),
             )
@@ -219,6 +220,7 @@ pub async fn download(
         url: &url,
         fetch_url: &fetch_url,
         output_path: &output_path,
+        protect_existing: req.policy == ExistingPolicy::Reuse,
         file_size,
         chunks: &chunks,
         retry_config: &retry_config,
@@ -248,13 +250,14 @@ pub async fn download(
 /// way every other download does: through a guarded open that will not follow
 /// a symlink, and through the rename that refuses to replace a file which
 /// appeared while we were working.
-async fn write_empty_file(output_path: &str) -> Result<()> {
+async fn write_empty_file(output_path: &str, protect_existing: bool) -> Result<()> {
     use crate::safe_file::{self, Access, Existing};
     use std::path::Path;
 
     let temp_path = format!("{}.part", output_path);
     let temp = Path::new(&temp_path);
-    let destination_existed = tokio::fs::symlink_metadata(output_path).await.is_ok();
+    let destination_existed =
+        !protect_existing && tokio::fs::symlink_metadata(output_path).await.is_ok();
 
     let file = safe_file::open_guarded(
         temp,
@@ -362,8 +365,12 @@ mod tests {
         let output = dir.path().join("empty.txt").to_string_lossy().into_owned();
 
         let outcome = download(
-            DownloadRequest::new(format!("http://{}/empty.txt", addr), Some(output.clone()), 4)
-                .with_allow_private(true),
+            DownloadRequest::new(
+                format!("http://{}/empty.txt", addr),
+                Some(output.clone()),
+                4,
+            )
+            .with_allow_private(true),
             CancellationToken::new(),
             crate::ui::silent(),
         )

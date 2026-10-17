@@ -111,3 +111,14 @@ mod tests {
         assert!(req.with_allow_private(true).allow_private);
     }
 }
+
+/// An intentionally stopped transfer, distinct from network/checkpoint failures.
+/// Service Pause must not hide a failed flush just because its token is set.
+#[derive(Debug)]
+pub struct TransferCancelled;
+impl std::fmt::Display for TransferCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Download cancelled")
+    }
+}
+impl std::error::Error for TransferCancelled {}
