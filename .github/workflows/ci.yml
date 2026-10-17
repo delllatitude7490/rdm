@@ -100,6 +100,7 @@ jobs:
           python3 tests/service_queue_smoke.py target/debug
           python3 tests/service_persistence_smoke.py target/debug
           python3 tests/service_pause_smoke.py target/debug
+          python3 tests/service_remove_smoke.py target/debug
 
       - name: Test Firefox native stdio to real service
         run: python3 extensions/firefox/tests/native_smoke.py target/debug

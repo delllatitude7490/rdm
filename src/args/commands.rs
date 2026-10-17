@@ -160,7 +160,7 @@ pub enum JobsCommand {
     Pause { handle: crate::managed::Handle },
     /// Request cancellation; the service drains the worker asynchronously
     Cancel { handle: crate::managed::Handle },
-    /// Remove a queued, paused or interrupted service job (retains a cancelled history record)
+    /// Forget a queued or finished service job and retry input; never delete files
     Remove { handle: crate::managed::Handle },
     /// Resume paused work or retry interrupted/cancelled/failed work as a new attempt
     #[command(alias = "resume")]

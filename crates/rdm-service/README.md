@@ -48,10 +48,10 @@ headless sessions can set it to a freshly created private directory.
 
 ## Commands and events
 
-The `rdm-ipc` crate defines Add, AddCli, List, Subscribe, Pause, Cancel, RemoveQueued, Retry
-and Shutdown. Traffic is length-prefixed JSON with internal protocol version 5
+The `rdm-ipc` crate defines Add, AddCli, List, Subscribe, Pause, Cancel, Remove, Retry
+and Shutdown. Traffic is length-prefixed JSON with internal protocol version 6
 and a 1 MiB frame limit.
-Add input has separate URL/destination length limits. Pause/Cancel/RemoveQueued/Retry/Shutdown include
+Add input has separate URL/destination length limits. Pause/Cancel/Remove/Retry/Shutdown include
 the service instance ID so stale clients cannot target reused job IDs.
 
 Each subscription starts with a complete snapshot, then receives coalesced
@@ -83,10 +83,13 @@ operation can delay it; there is no unsafe forced-abort button.
 - At most 64 total records, persisted in SQLite; oldest terminal records are evicted
   except held Paused/Interrupted work, which is never silently evicted.
   Unfinished records are never evicted. At 64 unfinished/held jobs, new Adds get Busy
-  with queue-full feedback. Cancelling/removing a queued item frees capacity; its
-  cancelled history record remains until ordinary terminal eviction.
-- Cancel targets queued or running jobs. RemoveQueued accepts queued or held work, rejecting
-  a promotion race; it never unexpectedly cancels a running job. Both are
+  with queue-full feedback. Cancel makes queued work evictable retryable history;
+  Remove immediately forgets the record and frees its slot.
+- Cancel targets queued or running/held jobs and retains retry input. Remove forgets
+  queued or any terminal job and its private retry input, committing before ACK
+  or publication. It never opens/deletes output, partial or checkpoint files.
+  Running/Pausing/Cancelling jobs are rejected, including promotion races: Cancel
+  and wait for cleanup before removing them. Both commands are
   instance-qualified and never automatically retried. Shutdown cancels all
   queued work, retains private retry input, and drains the running worker.
   Reopening the GUI reconnects to these records, including after restart.
@@ -95,8 +98,12 @@ operation can delay it; there is no unsafe forced-abort button.
   recovers as Paused. Existing Paused records stay held, without HEAD/GET/output work.
   Explicit Retry revalidates current policy and creates a new ID at the FIFO
   tail, including at capacity; duplicate retry while active is rejected. Other
-  held work remains idle. RemoveQueued/Cancel can dismiss held Paused/Interrupted work
-  into cancelled history. Current instance-qualified handles remain mandatory.
+  held work remains idle. Remove forgets held Paused/Interrupted records; Cancel
+  instead retains Cancelled retryable history. Removed IDs are never recycled;
+  old handles cannot recreate jobs or affect later attempts. Attached waiters see
+  absence as a nonzero, completion-unconfirmed outcome, not success. A lost remove
+  reply is ambiguous: inspect the list before doing anything else, never resend
+  automatically. Current instance-qualified handles remain mandatory.
   Existing engine partial/resume files are authoritative, never stored offsets.
   Resume/retry is not forced overwrite or a promise of byte-range continuation.
 - Direct HTTP/HTTPS CLI files now use this service through AddCli, with absolute
@@ -151,7 +158,7 @@ terminal eviction drops old inputs. Do not share state files/backups. Permission
 are an OS-user boundary, not encryption or protection from same-user processes.
 Retryable history remains bounded, not an indefinite archive of every attempt.
 Stop the previous service using its matching binary BEFORE upgrading; rebuild
-all installed Rust clients/service/native host together (IPC v5), and reload
+all installed Rust clients/service/native host together (IPC v6), and reload
 Firefox extension 0.3.0. The extension's external protocol stays v1.
 
 ## Validation
@@ -179,6 +186,8 @@ python3 tests/cli_service_smoke.py target/debug
 python3 tests/cli_protocol_smoke.py target/debug
 python3 tests/service_queue_smoke.py target/debug
 python3 tests/service_persistence_smoke.py target/debug
+python3 tests/service_pause_smoke.py target/debug
+python3 tests/service_remove_smoke.py target/debug
 ```
 
 Crash-resume regression: segmented range counters previously included data still
@@ -222,3 +231,19 @@ partial/manifest. The same protection is carried through ranged, streaming and
 empty-file publication so a file arriving during HEAD/inspection cannot become
 implicit overwrite consent. Explicit legacy interactive/overwrite policies are
 otherwise unchanged; valid partials without a final file still resume normally.
+
+## True Remove (IPC 6)
+
+The old RemoveQueued operation incorrectly kept retryable Cancelled history.
+Remove now deletes the record from the live SQLite image and all snapshots. This
+also lets users dismiss old Cancelled records produced by the previous behavior.
+SQLite stays schema 2; no state reset/migration is required. Rebuild matching CLI,
+GUI, service and native host and stop the old service before upgrading. Firefox's
+external v1 protocol/permissions are unchanged. No promise of secure erasure of
+backups, filesystem snapshots or storage-device history is made.
+
+`tests/service_remove_smoke.py` checks real CLI/Unix-socket removal, attached
+waiter failure (not false success), held and terminal kinds, exact unchanged
+partial/checkpoint/final bytes, URL-input purge from the live database, restart
+without resurrection/replay and monotonically allocated IDs. Actor/lifecycle
+coverage also injects failed removal commits and rejects running/draining races.

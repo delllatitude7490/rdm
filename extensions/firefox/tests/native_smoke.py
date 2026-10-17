@@ -68,7 +68,7 @@ with tempfile.TemporaryDirectory(prefix="rdm-firefox-test-") as name:
         with socket.socket(socket.AF_UNIX) as stream:
             stream.settimeout(5)
             stream.connect(str(socket_path))
-            data = json.dumps({"version": 5, "body": command}).encode()
+            data = json.dumps({"version": 6, "body": command}).encode()
             stream.sendall(struct.pack(">I", len(data))+data)
             size = struct.unpack(">I", receive(stream, 4))[0]
             assert 0 < size <= 1024*1024
@@ -102,7 +102,7 @@ with tempfile.TemporaryDirectory(prefix="rdm-firefox-test-") as name:
         assert queued["code"] == "queued", queued
         state = ipc({"command": "list"})
         assert state["jobs"][-1]["queued"]
-        ipc({"command": "remove_queued", "data": {"instance": state["instance"], "id": queued["job_id"]}})
+        ipc({"command": "remove", "data": {"instance": state["instance"], "id": queued["job_id"]}})
         state = until(lambda s: s["jobs"][0]["progress"]["downloaded"] > 0)
         before = state["jobs"][0]["progress"]["downloaded"]
         assert native({"action": "status"})["code"] == "active"
@@ -114,13 +114,13 @@ with tempfile.TemporaryDirectory(prefix="rdm-firefox-test-") as name:
         assert native({"action": "status"})["code"] == "ready"
         (downloads / "file.bin").write_bytes(b"keep existing output")
         assert native({"action": "add", "url": url})["code"] == "accepted"
-        state = until(lambda s: len(s["jobs"]) == 3 and s["jobs"][-1]["result"] is not None)
+        state = until(lambda s: len(s["jobs"]) == 2 and s["jobs"][-1]["result"] is not None)
         assert "AlreadyPresent" in state["jobs"][-1]["result"]
         assert (downloads / "file.bin").read_bytes() == b"keep existing output"
         assert native({"action": "add", "url": "https://u:secret@example.com/file"})["code"] == "invalid"
         assert native({"action": "shutdown"})["code"] == "invalid"
         assert native({"action": "add", "url": url, "directory": "/etc"})["code"] == "invalid"
-        assert len(ipc({"command": "list"})["jobs"]) == 3
+        assert len(ipc({"command": "list"})["jobs"]) == 2
         ipc({"command": "shutdown", "data": {"instance": state["instance"]}})
         deadline = time.monotonic()+10
         while socket_path.exists() and time.monotonic() < deadline:

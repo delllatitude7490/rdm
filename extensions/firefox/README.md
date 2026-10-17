@@ -129,7 +129,7 @@ This does not stop an already running service or remove downloads/configuration.
 Use the GUI's explicit service stop, or `rdm-service --shutdown`, if desired.
 
 Queue upgrade: stop an old service with its matching binary before rebuilding.
-Build matching Rust binaries (internal IPC v5) and reload this extension (0.3.0).
+Build matching Rust binaries (internal IPC v6) and reload this extension (0.3.0).
 The external Native Messaging framing/protocol remains v1. Queue and history
 survive service restart; unfinished work is held Interrupted until explicit retry.
 Deliberately paused work stays Paused; use the native GUI or CLI to resume it.

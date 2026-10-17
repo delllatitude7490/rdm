@@ -6,7 +6,7 @@ pub mod wire;
 
 use serde::{Deserialize, Serialize};
 
-pub const VERSION: u32 = 5;
+pub const VERSION: u32 = 6;
 pub const MAX_FRAME: usize = 1024 * 1024;
 pub const MAX_JOBS: usize = 64;
 pub type JobId = u64;
@@ -56,7 +56,9 @@ pub enum Request {
         instance: String,
         id: JobId,
     },
-    RemoveQueued {
+    /// Forget queued or terminal work and private retry input; never delete files.
+    /// Running/draining jobs must be cancelled and joined before removal.
+    Remove {
         instance: String,
         id: JobId,
     },

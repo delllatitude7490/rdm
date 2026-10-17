@@ -54,6 +54,7 @@ pub enum Message {
     FilenameChanged(String),
     Start,
     Cancel(u64),
+    Remove(u64),
     Pause(u64),
     Retry(u64),
     Shutdown,
@@ -223,20 +224,17 @@ impl App {
             }
             Message::Cancel(id) if self.connected && !self.stopping() => {
                 if let Some(snapshot) = &self.snapshot {
-                    let queued = self
-                        .jobs
-                        .iter()
-                        .any(|j| j.record.id == id && (j.record.queued || j.record.held()));
-                    return self.send(if queued {
-                        Request::RemoveQueued {
-                            instance: snapshot.instance.clone(),
-                            id,
-                        }
-                    } else {
-                        Request::Cancel {
-                            instance: snapshot.instance.clone(),
-                            id,
-                        }
+                    return self.send(Request::Cancel {
+                        instance: snapshot.instance.clone(),
+                        id,
+                    });
+                }
+            }
+            Message::Remove(id) if self.connected && !self.stopping() => {
+                if let Some(snapshot) = &self.snapshot {
+                    return self.send(Request::Remove {
+                        instance: snapshot.instance.clone(),
+                        id,
                     });
                 }
             }
@@ -476,7 +474,11 @@ impl App {
                 } else {
                     "Cancel"
                 })
-                .on_press(Message::Cancel(job.record.id))
+                .on_press(if job.record.queued {
+                    Message::Remove(job.record.id)
+                } else {
+                    Message::Cancel(job.record.id)
+                })
                 .height(44)
                 .padding([8, 16])
                 .style(button::secondary),
@@ -493,15 +495,15 @@ impl App {
                 .height(44)
                 .padding([8, 16]),
             );
-            if job.record.held() {
-                heading = heading.push(
-                    button("Remove")
-                        .on_press(Message::Cancel(job.record.id))
-                        .height(44)
-                        .padding([8, 16])
-                        .style(button::secondary),
-                );
-            }
+        }
+        if self.connected && !self.pending && !self.stopping() && !job.record.active() {
+            heading = heading.push(
+                button("Remove")
+                    .on_press(Message::Remove(job.record.id))
+                    .height(44)
+                    .padding([8, 16])
+                    .style(button::secondary),
+            );
         }
         let mut card = column![heading].spacing(14);
         if job.record.queued {
@@ -776,5 +778,44 @@ mod tests {
         assert!(!app.active());
         assert!(app.jobs[0].record.held());
         assert_eq!(app.jobs[0].speed, None);
+    }
+    #[test]
+    fn removal_waits_for_confirmed_snapshot_and_stale_replies_cannot_restore_card() {
+        let mut app = App::boot();
+        app.connected = true;
+        let mut paused = state("a", 1);
+        paused.jobs[0].result = Some(Finished::Paused);
+        paused.jobs[0].retryable = true;
+        app.apply(paused.clone());
+        let _ = app.update(Message::Remove(1));
+        assert!(app.pending);
+        assert_eq!(app.jobs.len(), 1, "do not hide unconfirmed removal");
+        let mut removed = state("a", 3);
+        removed.jobs.clear();
+        app.apply(removed);
+        assert!(app.jobs.is_empty());
+        app.apply(paused);
+        assert!(
+            app.jobs.is_empty(),
+            "an older subscription frame must not resurrect removal"
+        );
+    }
+    #[test]
+    fn failed_removal_keeps_job_visible_for_inspection_without_automatic_retry() {
+        let mut app = App::boot();
+        app.connected = true;
+        let mut queued = state("a", 1);
+        queued.jobs[0].queued = true;
+        app.apply(queued);
+        let _ = app.update(Message::Remove(1));
+        let _ = app.update(Message::ActionDone {
+            epoch: 0,
+            instance: "a".into(),
+            result: Err(client::Error::Uncertain),
+            submitted: false,
+        });
+        assert!(!app.pending);
+        assert_eq!(app.jobs.len(), 1);
+        assert!(app.error.is_some());
     }
 }

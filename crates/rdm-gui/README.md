@@ -61,7 +61,11 @@ deliberately paused jobs stay **Paused** in their own section. No network activi
 resumes automatically. **Resume** / **Resume / retry** explicitly creates
 a fresh attempt at the FIFO tail, using the saved destination and engine resume rules.
 Failed/cancelled jobs also offer retry; completed files remain protected.
-**Remove** releases held Paused/Interrupted work without touching partial files.
+**Remove** is separate from Cancel: it forgets queued or any terminal card and its
+saved retry input, including Paused/Interrupted, failed/cancelled and Finished
+history. It appears on every terminal card and never deletes output/partial files.
+No optimistic hiding: only a confirmed service snapshot removes the card.
+A running/draining job must finish cancellation before it can be removed.
 Saved progress may lag after a crash; it is not proof of a valid resumable offset.
 See the service README for state location, permissions and plaintext-URL privacy.
 Parallel downloads, provider/SFTP routing, graphical folder picker, tray

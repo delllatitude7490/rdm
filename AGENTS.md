@@ -204,5 +204,9 @@ a racing actual completion/failure must not be relabelled Paused. Explicit Retry
 revalidates current policy and creates a new ID at the tail, retaining the
 stored output/connections/private opt-in. Never replay ambient credentials or
 weaken overwrite/resume rules. Successful history must drop URL-bearing input.
+Remove is not Cancel: forget queued or terminal records and private input only
+with a committed image before ACK/events; never open/delete download files.
+Reject running/draining work even if the client saw a queued snapshot. Do not
+reuse IDs or claim completion when an attached waiter loses its removed record.
 All process tests MUST isolate XDG_STATE_HOME as well as config/runtime/HOME.
 The original `src/queue` remains separate; no implicit import or migration.
