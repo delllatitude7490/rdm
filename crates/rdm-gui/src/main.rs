@@ -1,5 +1,6 @@
 mod app;
 mod backend;
+mod desktop;
 mod theme;
 
 fn main() -> iced::Result {

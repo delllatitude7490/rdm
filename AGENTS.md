@@ -210,3 +210,11 @@ Reject running/draining work even if the client saw a queued snapshot. Do not
 reuse IDs or claim completion when an attached waiter loses its removed record.
 All process tests MUST isolate XDG_STATE_HOME as well as config/runtime/HOME.
 The original `src/queue` remains separate; no implicit import or migration.
+
+ClearFinished accepts only the explicit confirmed IDs in the current instance;
+reject the entire batch if any present target is active or retryable. Commit once
+before ACK/events; ignore already-absent IDs without broadening selection. Never
+delete output/partial/checkpoint files or recycle IDs. Desktop opening is GUI-local,
+explicit only (file opening confirmed), one file URI argument to xdg-open without
+a shell; never add a service/browser arbitrary-open endpoint or auto-open on result.
+Checks are best-effort, not a sandbox; errors/timeouts never trigger launch retries.

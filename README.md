@@ -28,6 +28,10 @@ HTTP listings, sync and the persisted queue remain outside the service: never
 target the same output concurrently from those legacy paths. Parallel managed
 transfers remain future milestones. Native Pause/Resume is available for shared-service direct downloads.
 
+**Open file** (with confirmation) and **Open folder** are available on successful
+records. Opening is never automatic and needs `xdg-open` from `xdg-utils`.
+**Clear finished** confirms an exact selection of Finished history; it leaves
+files and active, paused, interrupted or retryable jobs untouched.
 See [GUI setup](crates/rdm-gui/README.md) and
 [service architecture, runtime requirements and limitations](crates/rdm-service/README.md).
 
@@ -158,9 +162,8 @@ cargo build -p rdm -p rdm-service --release --locked
   try listing discovery). Empty/failed discovery falls back to managed direct
   files unless the URL is directory-shaped; those retain the legacy path.
 
-This change uses internal IPC **version 6** (true Remove replaces the old
-RemoveQueued-as-Cancel operation). SQLite remains schema 2; no reset or new
-migration is required for this fix. Before upgrading, explicitly stop
+This change uses internal IPC **version 7** (explicit-ID ClearFinished).
+SQLite remains schema 2; no reset or new migration is required for these actions. Before upgrading, explicitly stop
 any old service with its matching GUI/service binary. Build CLI, service, GUI
 and Native Messaging host from the same checkout if installed; an incompatible
 service is never automatically stopped or replaced. The Firefox extension's

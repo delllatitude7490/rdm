@@ -10,12 +10,15 @@ Debian/Ubuntu a useful starting point is:
 
 ```sh
 sudo apt-get install build-essential cmake pkg-config libssl-dev \
-    libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev libx11-dev libxcursor1
+    libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev libx11-dev libxcursor1 xdg-utils
 cargo build -p rdm-service -p rdm-gui --release
 ./target/release/rdm-gui
 ```
 
-Build/install **both** matching binaries. The GUI locates `rdm-service` beside
+Build/install matching Rust CLI, service, GUI and native host from one checkout
+when installed (internal IPC 7). Stop the old service explicitly before upgrading.
+SQLite stays schema 2; do not reset it. The extension remains 0.3.0 / external v1.
+Build/install **both** matching GUI/service binaries. The GUI locates `rdm-service` beside
 itself first, then on PATH. It starts the service on demand if none is reachable.
 A valid private `XDG_RUNTIME_DIR` and an X11 or Wayland desktop are required.
 
@@ -75,6 +78,38 @@ Direct HTTP/HTTPS CLI files now share this service. Provider/SFTP routes, listin
 sync and the persisted queue still do not: avoid concurrent writes to the same
 destination from those legacy paths. See [service setup, security and limitations](../rdm-service/README.md).
 
+## Explicit desktop and history actions
+
+Successful **Completed** / **Already exists** cards offer **Open folder** and
+**Open file**. Folder requests open the containing directory, not select a file.
+Open file first asks for confirmation; cancel does nothing. No completion,
+reconnection, restart or history restore launches anything automatically.
+
+The GUI hands one percent-escaped local `file:` URI directly to `xdg-open`,
+without a shell. Install `xdg-utils` and configure default desktop applications.
+Missing helpers, inaccessible/moved paths, launcher failures and a bounded
+10-second timeout are reported without automatic retry. A successful helper exit
+only confirms that opening was requested, not that an application window opened.
+A timeout is uncertain; inspect your desktop before trying again.
+
+Open file uses a read-only, nonblocking, no-follow descriptor check and requires
+a regular, user-owned, single-link file. It refuses executable permission bits,
+known script/launcher extensions and common executable/script signatures; use
+Open folder to inspect such downloads instead. These checks are **not a malware
+scanner or sandbox** and do not identify every executable format. The external
+default handler reopens a path: another same-user process could replace it after
+validation. Open only files you trust. Already exists does not verify file content.
+
+**Clear finished** appears only for the Finished section. Its confirmation freezes
+that section's exact IDs and service instance. Newly completed jobs while the
+prompt is open are not included. Active/queued, Paused, Interrupted and retryable
+Failed/Cancelled jobs stay available; retired nonretryable attempts can be cleared.
+Individual Remove is still available when deliberately discarding retryable work.
+Clearing changes history only, never downloads, partial files or checkpoints.
+The service validates the entire batch and commits once before ACK/events; the
+GUI never hides records optimistically. A disconnect/restart invalidates the
+prompt; an uncertain command must be inspected rather than resent automatically.
+
 ## Tests and manual checks
 
 ```sh
@@ -95,3 +130,10 @@ explicit shutdown, missing service executable, permissions/version mismatch,
 service crash/restart, existing output, invalid input and unknown-size transfers.
 Test keyboard navigation, scaling, accessibility, X11/Wayland and renderer/resource
 budgets on target machines rather than inferring them from successful compilation.
+
+The GUI model tests also cover frozen clear selections, confirmation cancellation,
+changed/removed paths, restart/disconnect invalidation and explicit-only opening.
+Desktop unit tests use a fake opener to check literal URI arguments, exit failures,
+missing helpers, timeouts, unusual filenames and unsafe filesystem types. They do
+not verify every desktop's real default handler. Manually check both open actions,
+cancel/confirm, missing files, absent xdg-utils, and clear/restart with files intact.

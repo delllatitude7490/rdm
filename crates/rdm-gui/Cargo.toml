@@ -14,4 +14,9 @@ gpu = ["iced/wgpu"]
 rdm = { path = "../.." }
 rdm-ipc = { path = "../rdm-ipc" }
 iced = { version = "0.14", default-features = false, features = ["tiny-skia", "tokio", "x11", "wayland", "linux-theme-detection"] }
-tokio = { version = "1", features = ["sync", "fs", "time"] }
+tokio = { version = "1", features = ["sync", "fs", "time", "process"] }
+url = "2"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

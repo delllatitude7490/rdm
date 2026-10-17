@@ -413,6 +413,44 @@ impl Manager {
                 self.publish(events);
                 Ok(Response::Snapshot(self.snapshot()))
             }
+            Request::ClearFinished { instance, ids } => {
+                if instance != self.instance {
+                    return Ok(error(
+                        ErrorCode::StaleInstance,
+                        "The service restarted. Reconnect before clearing history.",
+                    ));
+                }
+                let selected: std::collections::HashSet<_> = ids.iter().copied().collect();
+                if ids.is_empty()
+                    || ids.len() > MAX_JOBS
+                    || selected.len() != ids.len()
+                    || selected.contains(&0)
+                {
+                    return Ok(error(
+                        ErrorCode::Invalid,
+                        "Select 1 to 64 distinct finished job IDs.",
+                    ));
+                }
+                // Validate the WHOLE batch before changing anything. Missing
+                // records may already have been removed/evicted; never broaden
+                // the request to newly finished jobs not confirmed by the user.
+                if self
+                    .jobs
+                    .iter()
+                    .any(|m| selected.contains(&m.job.id) && !m.job.clearable())
+                {
+                    return Ok(error(
+                        ErrorCode::Invalid,
+                        "Clear finished cannot remove active, paused or retryable jobs.",
+                    ));
+                }
+                if self.jobs.iter().any(|m| selected.contains(&m.job.id)) {
+                    self.jobs.retain(|m| !selected.contains(&m.job.id));
+                    self.persist().await?;
+                    self.publish(events);
+                }
+                Ok(Response::Snapshot(self.snapshot()))
+            }
             Request::Cancel { instance, id } => {
                 if instance != self.instance {
                     return Ok(error(
@@ -851,5 +889,168 @@ mod pause_tests {
             }
         ));
         assert_eq!(m.jobs.len(), 1);
+    }
+    async fn history_manager() -> (tempfile::TempDir, Manager, watch::Sender<Snapshot>) {
+        let (root, mut m, _events) = manager().await;
+        let template = m.jobs.pop_front().unwrap();
+        for (id, result, retryable, queued) in [
+            (1, None, false, false),
+            (2, None, false, true),
+            (3, Some(Finished::Paused), true, false),
+            (4, Some(Finished::Interrupted), true, false),
+            (5, Some(Finished::Failed("test".into())), true, false),
+            (6, Some(Finished::Cancelled), true, false),
+            (
+                7,
+                Some(Finished::Completed {
+                    path: "/tmp/file.bin".into(),
+                    bytes: 17,
+                }),
+                false,
+                false,
+            ),
+            (
+                8,
+                Some(Finished::AlreadyPresent {
+                    path: "/tmp/file.bin".into(),
+                }),
+                false,
+                false,
+            ),
+            (9, Some(Finished::Paused), false, false),
+            (
+                10,
+                Some(Finished::Completed {
+                    path: "/tmp/file.bin".into(),
+                    bytes: 17,
+                }),
+                false,
+                false,
+            ),
+        ] {
+            let mut job = template.job.clone();
+            job.id = id;
+            job.queued = queued;
+            job.pausing = false;
+            job.result = result;
+            job.retryable = retryable;
+            if id == 9 {
+                job.retried_as = Some(10);
+            }
+            let input = if job.active() || retryable {
+                template.input.clone()
+            } else {
+                None
+            };
+            m.jobs.push_back(Managed {
+                job,
+                input,
+                sink: GuiSink::default(),
+                cancel: CancellationToken::new(),
+            });
+        }
+        m.next_id = 11;
+        m.persist().await.unwrap();
+        let (events, _) = watch::channel(m.snapshot());
+        (root, m, events)
+    }
+    #[tokio::test]
+    async fn clear_finished_is_explicit_atomic_durable_and_does_not_broaden_selection() {
+        let (root, mut m, events) = history_manager().await;
+        let response = m
+            .command(
+                Request::ClearFinished {
+                    instance: "test".into(),
+                    ids: vec![7, 8, 9, 999],
+                },
+                &mut JoinSet::new(),
+                &events,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(response, Response::Snapshot(_)));
+        assert_eq!(
+            m.jobs.iter().map(|m| m.job.id).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5, 6, 10]
+        );
+        assert_eq!(events.borrow().jobs.len(), 7);
+        assert_eq!(m.next_id, 11);
+        assert!(m.jobs.iter().all(|m| !m.cancel.is_cancelled()));
+        // Missing IDs are harmless, not a request to clear anything else.
+        let revision = m.revision;
+        m.command(
+            Request::ClearFinished {
+                instance: "test".into(),
+                ids: vec![7, 8],
+            },
+            &mut JoinSet::new(),
+            &events,
+        )
+        .await
+        .unwrap();
+        assert_eq!(m.revision, revision);
+        drop(m);
+        let (_store, saved) = Store::open(root.path().join("rdm/service")).await.unwrap();
+        assert_eq!(
+            saved.records.iter().map(|r| r.job.id).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5, 6, 10]
+        );
+        assert_eq!(saved.next_id, 11);
+    }
+    #[tokio::test]
+    async fn clear_finished_rejects_protected_or_invalid_batches_before_any_deletion() {
+        let (_root, mut m, events) = history_manager().await;
+        for ids in [
+            vec![],
+            vec![0],
+            vec![7, 7],
+            (1..=65).collect(),
+            vec![7, 1],
+            vec![7, 2],
+            vec![7, 3],
+            vec![7, 4],
+            vec![7, 5],
+            vec![7, 6],
+        ] {
+            let response = m
+                .command(
+                    Request::ClearFinished {
+                        instance: "test".into(),
+                        ids,
+                    },
+                    &mut JoinSet::new(),
+                    &events,
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                response,
+                Response::Error {
+                    code: ErrorCode::Invalid,
+                    ..
+                }
+            ));
+            assert_eq!(m.jobs.len(), 10, "partial clear must never occur");
+            assert_eq!(m.revision, 0);
+        }
+        let response = m
+            .command(
+                Request::ClearFinished {
+                    instance: "stale".into(),
+                    ids: vec![7],
+                },
+                &mut JoinSet::new(),
+                &events,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            response,
+            Response::Error {
+                code: ErrorCode::StaleInstance,
+                ..
+            }
+        ));
+        assert_eq!(m.jobs.len(), 10);
     }
 }

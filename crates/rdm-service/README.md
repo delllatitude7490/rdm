@@ -48,10 +48,10 @@ headless sessions can set it to a freshly created private directory.
 
 ## Commands and events
 
-The `rdm-ipc` crate defines Add, AddCli, List, Subscribe, Pause, Cancel, Remove, Retry
-and Shutdown. Traffic is length-prefixed JSON with internal protocol version 6
+The `rdm-ipc` crate defines Add, AddCli, List, Subscribe, Pause, Cancel, Remove, ClearFinished, Retry
+and Shutdown. Traffic is length-prefixed JSON with internal protocol version 7
 and a 1 MiB frame limit.
-Add input has separate URL/destination length limits. Pause/Cancel/Remove/Retry/Shutdown include
+Add input has separate URL/destination length limits. Pause/Cancel/Remove/ClearFinished/Retry/Shutdown include
 the service instance ID so stale clients cannot target reused job IDs.
 
 Each subscription starts with a complete snapshot, then receives coalesced
@@ -158,7 +158,7 @@ terminal eviction drops old inputs. Do not share state files/backups. Permission
 are an OS-user boundary, not encryption or protection from same-user processes.
 Retryable history remains bounded, not an indefinite archive of every attempt.
 Stop the previous service using its matching binary BEFORE upgrading; rebuild
-all installed Rust clients/service/native host together (IPC v6), and reload
+all installed Rust clients/service/native host together (IPC v7), and reload
 Firefox extension 0.3.0. The extension's external protocol stays v1.
 
 ## Validation
@@ -188,6 +188,7 @@ python3 tests/service_queue_smoke.py target/debug
 python3 tests/service_persistence_smoke.py target/debug
 python3 tests/service_pause_smoke.py target/debug
 python3 tests/service_remove_smoke.py target/debug
+python3 tests/service_history_smoke.py target/debug
 ```
 
 Crash-resume regression: segmented range counters previously included data still
@@ -247,3 +248,21 @@ waiter failure (not false success), held and terminal kinds, exact unchanged
 partial/checkpoint/final bytes, URL-input purge from the live database, restart
 without resurrection/replay and monotonically allocated IDs. Actor/lifecycle
 coverage also injects failed removal commits and rejects running/draining races.
+
+## Clear Finished history (IPC 7)
+
+ClearFinished takes the current instance and an explicit bounded set of IDs,
+validated atomically before deleting any record. Running/draining/queued work and
+all retryable records (Paused, Interrupted, Failed, Cancelled) are protected.
+Only terminal nonretryable history is eligible, including retired attempts.
+Missing IDs are ignored; a batch containing a protected current record fails
+without partially clearing eligible records. New completions are never implicitly
+included. The commit precedes publication/ACK; a storage error fails closed and
+keeps the last durable image. No output, partial or checkpoint file is opened or
+deleted. IDs are not reused. SQLite remains schema 2 with no reset required.
+
+`tests/service_history_smoke.py` covers exact selections versus later completions,
+protected/stale batches, actual CLI/HTTP jobs, unchanged files and crash recovery
+without resurrection or network replay. Lifecycle tests inject clear-commit
+failure and verify the previous image remains recoverable. Opening files/folders
+is a GUI-local explicit desktop action, not a service/native-host command.
