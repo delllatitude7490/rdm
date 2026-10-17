@@ -66,7 +66,7 @@ with tempfile.TemporaryDirectory(prefix='rdm-cli-test-') as name:
         with socket.socket(socket.AF_UNIX) as stream:
             stream.settimeout(8)
             stream.connect(str(sock))
-            data = json.dumps({'version': 6, 'body': command}).encode()
+            data = json.dumps({'version': 7, 'body': command}).encode()
             stream.sendall(struct.pack('>I', len(data)) + data)
             size = struct.unpack('>I', receive(stream, 4))[0]
             return json.loads(receive(stream, size))['body']

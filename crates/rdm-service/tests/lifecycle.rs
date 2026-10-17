@@ -1447,3 +1447,74 @@ async fn failed_remove_commit_never_acknowledges_or_forgets_durable_job() {
     );
     service.shutdown().await;
 }
+
+#[tokio::test]
+async fn failed_clear_commit_keeps_the_last_durable_history_and_protected_jobs() {
+    let finite = http(true).await;
+    let blocked = http(false).await;
+    let mut service = Service::spawn(tempfile::tempdir().unwrap());
+    let initial = service.ready().await;
+    client::request_at(&service.paths, service.add(&finite.base, "finished.bin"))
+        .await
+        .unwrap();
+    service.until(|s| s.jobs[0].result.is_some()).await;
+    client::request_at(&service.paths, service.add(&blocked.base, "active.bin"))
+        .await
+        .unwrap();
+    service.until(|s| s.jobs[1].progress.downloaded > 0).await;
+    let mut feed = client::subscribe_at(&service.paths).await.unwrap();
+    let journal = service
+        .root
+        .path()
+        .join("state/rdm/service/jobs.sqlite3-journal");
+    fs::create_dir(&journal).unwrap();
+    let error = client::request_at(
+        &service.paths,
+        Request::ClearFinished {
+            instance: initial.instance,
+            ids: vec![1],
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        client::Error::Rejected(ErrorCode::Internal, _)
+    ));
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let s = feed.next().await.unwrap();
+            assert_eq!(s.jobs.len(), 2);
+            if s.shutting_down {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    fs::remove_dir(&journal).unwrap();
+    timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(status) = service.child.try_wait().unwrap() {
+                assert!(!status.success());
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    service.child = Service::command(&service.root).spawn().unwrap();
+    let recovered = service.ready().await;
+    assert_eq!(recovered.jobs.len(), 2);
+    assert!(matches!(
+        recovered.jobs[0].result,
+        Some(Finished::Completed { .. })
+    ));
+    assert_eq!(recovered.jobs[1].result, Some(Finished::Interrupted));
+    assert_eq!(
+        fs::read(service.root.path().join("downloads/finished.bin")).unwrap(),
+        vec![42; 30720]
+    );
+    service.shutdown().await;
+}

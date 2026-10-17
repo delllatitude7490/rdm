@@ -72,7 +72,7 @@ with tempfile.TemporaryDirectory(prefix='rdm-pause-') as name:
     def ipc(command):
         with socket.socket(socket.AF_UNIX) as s:
             s.settimeout(10); s.connect(str(sock))
-            data = json.dumps({'version':6, 'body':command}).encode()
+            data = json.dumps({'version':7, 'body':command}).encode()
             s.sendall(struct.pack('>I',len(data))+data)
             size = struct.unpack('>I',receive(s,4))[0]
             result = json.loads(receive(s,size))['body']

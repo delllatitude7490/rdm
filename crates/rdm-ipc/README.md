@@ -6,8 +6,8 @@ client for RDM. There is no dependency on Iced or the download engine.
 See [service architecture and limitations](../rdm-service/README.md).
 
 Wire format: a big-endian u32 byte length (1..=1 MiB), followed by a JSON
-`Packet { version, body }` (internal version 6; matching Rust binaries required). Exactly one request is sent per connection. A List,
-Add, AddCli, Pause, Cancel, Remove, Retry or Shutdown receives one response; Subscribe receives an initial
+`Packet { version, body }` (internal version 7; matching Rust binaries required). Exactly one request is sent per connection. A List,
+Add, AddCli, Pause, Cancel, Remove, ClearFinished, Retry or Shutdown receives one response; Subscribe receives an initial
 snapshot followed by snapshots until disconnect. JSON parse errors never echo
 untrusted payload text. Version mismatch is an explicit response.
 
@@ -19,7 +19,7 @@ admission and engine path.
 
 `request_at` sends a mutation once. Failures after connecting may be ambiguous,
 so callers must not automatically retry them. `ensure_running` retries only
-read-only startup probes. Pause, Cancel, Remove, Retry and Shutdown must use the instance ID from the
+read-only startup probes. Pause, Cancel, Remove, ClearFinished, Retry and Shutdown must use the instance ID from the
 current snapshot, not a saved job ID from an earlier service process.
 
 `Job.queued` explicitly distinguishes waiting from running; `active()` means
@@ -53,3 +53,12 @@ Paused and Interrupted records from eviction. Paused and Pausing recovery never
 performs network requests. Duplicate Pause is idempotent; resume uses Retry and
 creates a fresh handle, not reactivation of an old attempt. Cancel can override
 Pausing; a real completed/failed engine result wins over a late pause request.
+
+`ClearFinished { instance, ids }` accepts 1..=64 distinct, nonzero explicit IDs.
+It never means "all jobs finished by the time this arrives". Missing IDs are
+ignored (already removed/evicted); any present selected record with active work
+or retry input rejects the entire batch. `Job::clearable()` matches the GUI's
+Finished section: terminal and nonretryable, including retired attempts.
+The service commits the selected deletion once before ACK/events, touches no
+output files, and never recycles IDs. A wholly absent selection is a no-op.
+No desktop-opening capability is exposed by IPC or the Native Messaging host.

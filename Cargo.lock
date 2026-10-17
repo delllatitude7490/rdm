@@ -3289,9 +3289,12 @@ name = "rdm-gui"
 version = "0.1.0"
 dependencies = [
  "iced",
+ "libc",
  "rdm",
  "rdm-ipc",
+ "tempfile",
  "tokio",
+ "url",
 ]
 
 [[package]]

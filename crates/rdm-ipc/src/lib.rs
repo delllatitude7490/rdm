@@ -6,7 +6,7 @@ pub mod wire;
 
 use serde::{Deserialize, Serialize};
 
-pub const VERSION: u32 = 6;
+pub const VERSION: u32 = 7;
 pub const MAX_FRAME: usize = 1024 * 1024;
 pub const MAX_JOBS: usize = 64;
 pub type JobId = u64;
@@ -61,6 +61,12 @@ pub enum Request {
     Remove {
         instance: String,
         id: JobId,
+    },
+    /// Atomically forget the explicitly confirmed Finished-section IDs only.
+    /// Active or retryable records are protected; output files are untouched.
+    ClearFinished {
+        instance: String,
+        ids: Vec<JobId>,
     },
     /// Explicitly requeue a retryable record; never automatic on recovery.
     Retry {
@@ -161,6 +167,10 @@ impl Job {
     /// Held work cannot be evicted as ordinary terminal history.
     pub fn held(&self) -> bool {
         self.retryable && matches!(self.result, Some(Finished::Interrupted | Finished::Paused))
+    }
+    /// Finished-section history only; never discard a user's retryable work.
+    pub fn clearable(&self) -> bool {
+        !self.active() && !self.retryable
     }
     pub fn running(&self) -> bool {
         self.active() && !self.queued

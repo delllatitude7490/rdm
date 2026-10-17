@@ -1,5 +1,5 @@
-use crate::backend;
 use crate::theme::{ACCENT, ERROR, MUTED};
+use crate::{backend, desktop};
 use iced::widget::{button, column, container, progress_bar, row, scrollable, text, text_input};
 use iced::{Element, Fill, Subscription, Task};
 use rdm::secret_url::SecretUrl;
@@ -17,6 +17,14 @@ pub struct App {
     pending: bool,
     epoch: u64,
     connection_message: String,
+    confirmation: Option<Confirmation>,
+    open_pending: bool,
+    open_notice: Option<String>,
+}
+#[derive(Debug, Clone)]
+enum Confirmation {
+    Open { id: u64, path: String },
+    Clear { instance: String, ids: Vec<u64> },
 }
 struct Tracked {
     record: Job,
@@ -57,6 +65,12 @@ pub enum Message {
     Remove(u64),
     Pause(u64),
     Retry(u64),
+    OpenFile(u64),
+    OpenFolder(u64),
+    ClearFinished,
+    Confirm,
+    DismissConfirmation,
+    OpenDone(Result<(), String>),
     Shutdown,
     Reconnect,
     CloseRequested,
@@ -81,6 +95,9 @@ impl App {
             pending: false,
             epoch: 0,
             connection_message: "Connecting to the download service…".into(),
+            confirmation: None,
+            open_pending: false,
+            open_notice: None,
         }
     }
     fn active(&self) -> bool {
@@ -95,6 +112,7 @@ impl App {
                 return;
             }
             if old.instance != snapshot.instance {
+                self.confirmation = None;
                 self.jobs.clear();
                 self.pending = false;
                 self.error = Some("The service restarted. Unfinished downloads are held; paused jobs stay paused. Choose Resume / retry to continue.".into());
@@ -134,7 +152,7 @@ impl App {
         let Some(snapshot) = &self.snapshot else {
             return Task::none();
         };
-        if !self.connected || self.pending {
+        if !self.connected || self.pending || self.confirmation.is_some() {
             return Task::none();
         }
         let instance = snapshot.instance.clone();
@@ -156,6 +174,7 @@ impl App {
             // Dropping the GUI subscription never cancels service-owned work.
             Message::CloseRequested => return iced::exit(),
             Message::Reconnect => {
+                self.confirmation = None;
                 self.epoch += 1;
                 self.connected = false;
                 self.pending = false;
@@ -177,6 +196,7 @@ impl App {
                     self.apply(snapshot);
                 }
                 backend::Event::Disconnected(message) => {
+                    self.confirmation = None;
                     self.connected = false;
                     self.connection_message = message;
                     for job in &mut self.jobs {
@@ -254,6 +274,67 @@ impl App {
                     });
                 }
             }
+            Message::OpenFile(id) if !self.open_pending && self.confirmation.is_none() => {
+                if let Some(path) = self.completed_path(id) {
+                    self.confirmation = Some(Confirmation::Open { id, path });
+                }
+            }
+            Message::OpenFolder(id) if !self.open_pending && self.confirmation.is_none() => {
+                if let Some(path) = self.completed_path(id) {
+                    return self.open(path, desktop::Target::Folder);
+                }
+            }
+            Message::ClearFinished
+                if self.connected
+                    && !self.pending
+                    && !self.stopping()
+                    && self.confirmation.is_none() =>
+            {
+                let ids = self
+                    .jobs
+                    .iter()
+                    .filter(|j| j.record.clearable())
+                    .map(|j| j.record.id)
+                    .collect::<Vec<_>>();
+                if !ids.is_empty()
+                    && let Some(s) = &self.snapshot
+                {
+                    self.confirmation = Some(Confirmation::Clear {
+                        instance: s.instance.clone(),
+                        ids,
+                    });
+                }
+            }
+            Message::DismissConfirmation => self.confirmation = None,
+            Message::Confirm => match self.confirmation.take() {
+                Some(Confirmation::Open { id, path }) if !self.open_pending => {
+                    if self.completed_path(id).as_ref() == Some(&path) {
+                        return self.open(path, desktop::Target::File);
+                    }
+                    self.open_notice = Some(
+                        "The download changed or was removed. Inspect it before opening.".into(),
+                    );
+                }
+                Some(Confirmation::Clear { instance, ids })
+                    if self.connected
+                        && !self.pending
+                        && !self.stopping()
+                        && self
+                            .snapshot
+                            .as_ref()
+                            .is_some_and(|s| s.instance == instance) =>
+                {
+                    return self.send(Request::ClearFinished { instance, ids });
+                }
+                _ => {}
+            },
+            Message::OpenDone(result) => {
+                self.open_pending = false;
+                self.open_notice = Some(match result {
+                    Ok(()) => "Opening requested from the desktop. RDM cannot confirm the application opened.".into(),
+                    Err(error) => error,
+                });
+            }
             Message::Shutdown if self.connected && !self.stopping() => {
                 if let Some(snapshot) = &self.snapshot {
                     return self.send(Request::Shutdown {
@@ -265,6 +346,22 @@ impl App {
         }
         Task::none()
     }
+    fn completed_path(&self, id: u64) -> Option<String> {
+        self.jobs
+            .iter()
+            .find(|j| j.record.id == id)
+            .and_then(|j| match &j.record.result {
+                Some(Finished::Completed { path, .. } | Finished::AlreadyPresent { path }) => {
+                    Some(path.clone())
+                }
+                _ => None,
+            })
+    }
+    fn open(&mut self, path: String, target: desktop::Target) -> Task<Message> {
+        self.open_pending = true;
+        self.open_notice = Some("Requesting desktop application…".into());
+        Task::perform(desktop::open(path, target), Message::OpenDone)
+    }
     pub fn subscription(&self) -> Subscription<Message> {
         Subscription::batch([
             iced::window::close_requests().map(|_| Message::CloseRequested),
@@ -273,7 +370,8 @@ impl App {
         ])
     }
     pub fn view(&self) -> Element<'_, Message> {
-        let editable = self.connected && !self.pending && !self.stopping();
+        let editable =
+            self.connected && !self.pending && !self.stopping() && self.confirmation.is_none();
         let mut url = text_input("https://example.com/file.zip", self.url.as_str()).padding(12);
         let mut directory = text_input("/home/you/Downloads", &self.directory).padding(12);
         let mut filename = text_input("Automatic from URL", &self.filename).padding(12);
@@ -354,7 +452,7 @@ impl App {
             let mut stop = button("Stop service & cancel downloads")
                 .height(44)
                 .style(button::secondary);
-            if !self.pending && !self.stopping() {
+            if editable {
                 stop = stop.on_press(Message::Shutdown);
             }
             stop
@@ -374,7 +472,43 @@ impl App {
             .spacing(12)
             .align_y(iced::Alignment::Center),
         );
-        if !self.jobs.is_empty() {
+        if let Some(notice) = &self.open_notice {
+            content = content.push(text(notice).size(13).color(MUTED));
+        }
+        if let Some(confirmation) = &self.confirmation {
+            let (title, detail, action) = match confirmation {
+                Confirmation::Open { path, .. } => (
+                    "Open downloaded file?".to_owned(),
+                    format!("{path}\n\nOnly open files you trust. This asks your default application to open the file. Known executable/script types and launchers are refused; these checks are not a security guarantee. Use Open folder to inspect files."),
+                    "Open file",
+                ),
+                Confirmation::Clear { ids, .. } => (
+                    format!("Clear {} finished history records?", ids.len()),
+                    "Downloaded files stay untouched. Running, queued, Paused, Interrupted and retryable failed/cancelled work stay in the list. Only the records selected when you clicked Clear will be forgotten.".to_owned(),
+                    "Clear history",
+                ),
+            };
+            content = content.push(
+                container(
+                    column![
+                        text(title).size(20),
+                        text(detail).size(14),
+                        row![
+                            button("Keep / go back")
+                                .on_press(Message::DismissConfirmation)
+                                .height(44)
+                                .style(button::secondary),
+                            button(action).on_press(Message::Confirm).height(44)
+                        ]
+                        .spacing(12),
+                    ]
+                    .spacing(16),
+                )
+                .padding(22)
+                .width(Fill)
+                .style(container::rounded_box),
+            );
+        } else if !self.jobs.is_empty() {
             for section in [
                 "Downloading",
                 "Queued",
@@ -389,12 +523,24 @@ impl App {
                     "Needs attention" => {
                         job.record.retryable && job.record.result != Some(Finished::Paused)
                     }
-                    _ => !job.record.active() && !job.record.retryable,
+                    _ => job.record.clearable(),
                 };
                 if self.jobs.iter().any(|j| selected(&j)) {
                     let count = self.jobs.iter().filter(selected).count();
-                    content =
-                        content.push(text(format!("{section} · {count}")).size(17).color(MUTED));
+                    let mut section_heading = row![
+                        text(format!("{section} · {count}")).size(17).color(MUTED),
+                        iced::widget::space().width(Fill)
+                    ]
+                    .align_y(iced::Alignment::Center);
+                    if section == "Finished" {
+                        let mut clear =
+                            button("Clear finished").height(38).style(button::secondary);
+                        if editable {
+                            clear = clear.on_press(Message::ClearFinished);
+                        }
+                        section_heading = section_heading.push(clear);
+                    }
+                    content = content.push(section_heading);
                     if section == "Finished" {
                         for job in self.jobs.iter().rev().filter(selected) {
                             content = content.push(self.job_view(job));
@@ -506,6 +652,18 @@ impl App {
             );
         }
         let mut card = column![heading].spacing(14);
+        if matches!(
+            job.record.result,
+            Some(Finished::Completed { .. } | Finished::AlreadyPresent { .. })
+        ) {
+            let mut file = button("Open file").height(40);
+            let mut folder = button("Open folder").height(40).style(button::secondary);
+            if !self.open_pending && self.confirmation.is_none() {
+                file = file.on_press(Message::OpenFile(job.record.id));
+                folder = folder.on_press(Message::OpenFolder(job.record.id));
+            }
+            card = card.push(row![file, folder].spacing(10));
+        }
         if job.record.queued {
             let position = self
                 .jobs
@@ -817,5 +975,98 @@ mod tests {
         assert!(!app.pending);
         assert_eq!(app.jobs.len(), 1);
         assert!(app.error.is_some());
+    }
+    fn successful_state() -> Snapshot {
+        let mut s = state("a", 1);
+        s.jobs[0].result = Some(Finished::Completed {
+            path: "/tmp/file.txt".into(),
+            bytes: 17,
+        });
+        s
+    }
+    #[test]
+    fn clear_requires_confirmation_and_freezes_exact_finished_ids() {
+        let mut app = App::boot();
+        app.connected = true;
+        let mut s = successful_state();
+        let mut paused = s.jobs[0].clone();
+        paused.id = 2;
+        paused.retryable = true;
+        paused.result = Some(Finished::Paused);
+        s.jobs.push(paused);
+        app.apply(s.clone());
+        let _ = app.update(Message::ClearFinished);
+        assert!(!app.pending);
+        assert!(matches!(&app.confirmation, Some(Confirmation::Clear { ids, .. }) if ids == &[1]));
+        let mut newer = s.jobs[0].clone();
+        newer.id = 3;
+        s.jobs.push(newer);
+        s.revision = 2;
+        app.apply(s);
+        assert!(matches!(&app.confirmation, Some(Confirmation::Clear { ids, .. }) if ids == &[1]));
+        let _ = app.update(Message::DismissConfirmation);
+        assert!(app.confirmation.is_none());
+        assert_eq!(app.jobs.len(), 3);
+        let _ = app.update(Message::ClearFinished);
+        let _ = app.update(Message::Confirm);
+        assert!(app.pending);
+        assert_eq!(app.jobs.len(), 3, "wait for confirmed service snapshot");
+    }
+    #[test]
+    fn opening_is_never_automatic_and_open_file_requires_confirmation() {
+        let mut app = App::boot();
+        app.apply(successful_state());
+        assert!(!app.open_pending && app.confirmation.is_none());
+        let _ = app.update(Message::OpenFile(1));
+        assert!(!app.open_pending);
+        assert!(matches!(
+            app.confirmation,
+            Some(Confirmation::Open { id: 1, .. })
+        ));
+        let _ = app.update(Message::DismissConfirmation);
+        assert!(!app.open_pending && app.confirmation.is_none());
+        let _ = app.update(Message::OpenFile(1));
+        let _ = app.update(Message::Confirm);
+        assert!(app.open_pending);
+        let _ = app.update(Message::OpenDone(Ok(())));
+        assert!(!app.open_pending);
+        assert!(app.open_notice.as_ref().unwrap().contains("cannot confirm"));
+    }
+    #[test]
+    fn restart_or_disconnect_invalidates_confirmation_and_removed_files_are_not_opened() {
+        let mut app = App::boot();
+        app.connected = true;
+        app.apply(successful_state());
+        let _ = app.update(Message::ClearFinished);
+        let mut s = successful_state();
+        s.instance = "b".into();
+        app.apply(s);
+        assert!(app.confirmation.is_none());
+        let _ = app.update(Message::OpenFile(1));
+        let _ = app.update(Message::Service(
+            0,
+            backend::Event::Disconnected("offline".into()),
+        ));
+        assert!(app.confirmation.is_none());
+        let _ = app.update(Message::OpenFile(1));
+        let mut removed = state("b", 3);
+        removed.jobs.clear();
+        app.apply(removed);
+        let _ = app.update(Message::Confirm);
+        assert!(!app.open_pending);
+        assert!(app.open_notice.as_ref().unwrap().contains("removed"));
+    }
+    #[test]
+    fn unfinished_and_retryable_work_does_not_offer_file_actions_or_bulk_clear() {
+        let mut app = App::boot();
+        app.connected = true;
+        let mut s = state("a", 1);
+        s.jobs[0].retryable = true;
+        s.jobs[0].result = Some(Finished::Failed("error".into()));
+        app.apply(s);
+        let _ = app.update(Message::ClearFinished);
+        let _ = app.update(Message::OpenFile(1));
+        let _ = app.update(Message::OpenFolder(1));
+        assert!(app.confirmation.is_none() && !app.pending && !app.open_pending);
     }
 }
