@@ -64,7 +64,7 @@ fn find<'a>(snapshot: &'a Snapshot, handle: &Handle) -> Result<&'a Job> {
         .jobs
         .iter()
         .find(|j| j.id == handle.id)
-        .context("Job is no longer in service memory; its result is unknown.")
+        .context("Job was removed or is no longer retained; completion is unconfirmed. Files were not deleted by removal.")
 }
 fn print_job(instance: &str, job: &Job) {
     let state = if job.retried_as.is_some() {
@@ -122,8 +122,8 @@ pub fn jobs(command: &JobsCommand) -> Result<()> {
                 eprintln!("Requeued by explicit request (not completed). Inspect with `rdm jobs inspect {new_handle}`.");
             }
             JobsCommand::Remove { handle } => {
-                client::request(Request::RemoveQueued { instance: handle.instance.clone(), id: handle.id }).await.map_err(safe_error)?;
-                println!("Removed waiting job {handle}; retained as cancelled history.");
+                client::request(Request::Remove { instance: handle.instance.clone(), id: handle.id }).await.map_err(safe_error)?;
+                println!("Removed job {handle} from saved jobs. Downloaded and partial files were left untouched.");
             }
             JobsCommand::Cancel { handle } => {
                 let s = client::request(Request::Cancel { instance: handle.instance.clone(), id: handle.id }).await.map_err(safe_error)?;

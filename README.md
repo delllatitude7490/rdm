@@ -126,10 +126,13 @@ cargo build -p rdm -p rdm-service --release --locked
   submissions fail explicitly with queue-full feedback; no pending work is evicted.
 - `jobs list` distinguishes queued, active and finished results; `--json` includes
   the `queued` flag and FIFO record order. `jobs cancel` can cancel either a queued
-  or running job. `jobs remove` removes queued or held Paused/Interrupted jobs; a race
-  with promotion is rejected rather than cancelling a now-running transfer.
-  Removed jobs retain a cancelled history record so attached waiters can finish
-  truthfully. Once worker cleanup finishes, the next queued job starts.
+  or running job and retains retryable Cancelled history. `jobs remove` forgets queued
+  or any terminal job (including Paused/Interrupted) and its saved retry input.
+  The card disappears, including after restart; downloaded, partial and checkpoint
+  files are never deleted. A promotion/drain race is rejected: Cancel running work
+  and wait for cleanup, then Remove. An attached waiter whose job is removed exits
+  nonzero with completion unconfirmed; removal must never imply success.
+  Once worker cleanup finishes, the next queued job starts.
 - Queued inputs do no network or output/resume-file work until their turn.
   Existing-file and network policy are enforced again by the engine at execution.
   Shutdown cancels queued work without starting it and drains the running worker.
@@ -155,7 +158,9 @@ cargo build -p rdm -p rdm-service --release --locked
   try listing discovery). Empty/failed discovery falls back to managed direct
   files unless the URL is directory-shaped; those retain the legacy path.
 
-This change uses internal IPC **version 5**. Before upgrading, explicitly stop
+This change uses internal IPC **version 6** (true Remove replaces the old
+RemoveQueued-as-Cancel operation). SQLite remains schema 2; no reset or new
+migration is required for this fix. Before upgrading, explicitly stop
 any old service with its matching GUI/service binary. Build CLI, service, GUI
 and Native Messaging host from the same checkout if installed; an incompatible
 service is never automatically stopped or replaced. The Firefox extension's
@@ -187,8 +192,8 @@ record links to the new attempt; old handles cannot cancel it or enqueue a secon
 resume. Read current handles from `rdm jobs list` after any service restart.
 
 An attached CLI waiter ends nonzero with a clear Paused message; it does not claim
-completion or automatically follow a new attempt. `jobs remove` dismisses a held
-pause into Cancelled history without deleting partials. Explicit Cancel during
+completion or automatically follow a new attempt. `jobs remove` forgets a held
+pause and its retry input without deleting partials. Explicit Cancel during
 Pausing overrides the hold; shutdown itself preserves an existing pause request.
 If completion or an actual error wins the pause race, its real result is shown.
 

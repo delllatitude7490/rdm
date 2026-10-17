@@ -231,7 +231,7 @@ async fn one_owner_duplicate_launch_cancel_and_shutdown_drain() {
     assert!(other.queued);
     client::request_at(
         &service.paths,
-        Request::RemoveQueued {
+        Request::Remove {
             instance: queued.instance,
             id: other.id,
         },
@@ -511,7 +511,7 @@ async fn fifo_cancel_queued_then_cancel_running_starts_next_after_drain() {
     );
     let error = client::request_at(
         &service.paths,
-        Request::RemoveQueued {
+        Request::Remove {
             instance: initial.instance.clone(),
             id: s.jobs[0].id,
         },
@@ -524,7 +524,7 @@ async fn fifo_cancel_queued_then_cancel_running_starts_next_after_drain() {
     ));
     let error = client::request_at(
         &service.paths,
-        Request::RemoveQueued {
+        Request::Remove {
             instance: "stale".into(),
             id: s.jobs[2].id,
         },
@@ -537,15 +537,15 @@ async fn fifo_cancel_queued_then_cancel_running_starts_next_after_drain() {
     ));
     let removed = client::request_at(
         &service.paths,
-        Request::RemoveQueued {
+        Request::Remove {
             instance: initial.instance.clone(),
             id: s.jobs[2].id,
         },
     )
     .await
     .unwrap();
-    assert_eq!(removed.jobs[2].result, Some(Finished::Cancelled));
-    assert!(!removed.jobs[2].queued);
+    assert_eq!(removed.jobs.len(), 2);
+    assert!(!removed.jobs.iter().any(|j| j.id == s.jobs[2].id));
     client::request_at(
         &service.paths,
         Request::Cancel {
@@ -561,7 +561,7 @@ async fn fifo_cancel_queued_then_cancel_running_starts_next_after_drain() {
         done.jobs[1].result,
         Some(Finished::Completed { bytes: 30720, .. })
     ));
-    assert_eq!(done.jobs[2].result, Some(Finished::Cancelled));
+    assert!(!done.jobs.iter().any(|j| j.id == s.jobs[2].id));
     assert_eq!(
         fs::read(service.root.path().join("downloads/second.bin")).unwrap(),
         vec![42; 30720]
@@ -665,7 +665,7 @@ async fn full_queue_never_evicts_unfinished_work_and_shutdown_discards_pending()
     assert_eq!(service.ready().await.jobs[0].id, s.jobs[0].id);
     client::request_at(
         &service.paths,
-        Request::RemoveQueued {
+        Request::Remove {
             instance: initial.instance.clone(),
             id: s.jobs[20].id,
         },
@@ -998,14 +998,14 @@ async fn held_recovery_at_capacity_is_not_evicted_and_retry_still_works() {
     ));
     let removed = client::request_at(
         &service.paths,
-        Request::RemoveQueued {
+        Request::Remove {
             instance: recovered.instance,
             id: 1,
         },
     )
     .await
     .unwrap();
-    assert_eq!(removed.jobs[0].result, Some(Finished::Cancelled));
+    assert!(!removed.jobs.iter().any(|j| j.id == 1));
     service.shutdown().await;
 }
 
@@ -1289,14 +1289,14 @@ async fn pause_drains_before_next_worker_and_held_jobs_survive_restart() {
     );
     let removed = client::request_at(
         &service.paths,
-        Request::RemoveQueued {
+        Request::Remove {
             instance: recovered.instance,
             id: 1,
         },
     )
     .await
     .unwrap();
-    assert_eq!(removed.jobs[0].result, Some(Finished::Cancelled));
+    assert!(!removed.jobs.iter().any(|j| j.id == 1));
     service.shutdown().await;
 }
 
@@ -1379,5 +1379,71 @@ async fn recovery_honours_committed_pause_intent_without_replaying_it() {
     assert!(!s.jobs[0].pausing);
     assert!(s.jobs[0].held());
     assert!(!s.jobs[0].active());
+    service.shutdown().await;
+}
+
+#[tokio::test]
+async fn failed_remove_commit_never_acknowledges_or_forgets_durable_job() {
+    let blocked = http(false).await;
+    let mut service = Service::spawn(tempfile::tempdir().unwrap());
+    let initial = service.ready().await;
+    client::request_at(&service.paths, service.add(&blocked.base, "active.bin"))
+        .await
+        .unwrap();
+    service.until(|s| s.jobs[0].progress.downloaded > 0).await;
+    client::request_at(&service.paths, service.add(&blocked.base, "queued.bin"))
+        .await
+        .unwrap();
+    let mut feed = client::subscribe_at(&service.paths).await.unwrap();
+    let journal = service
+        .root
+        .path()
+        .join("state/rdm/service/jobs.sqlite3-journal");
+    fs::create_dir(&journal).unwrap();
+    let error = client::request_at(
+        &service.paths,
+        Request::Remove {
+            instance: initial.instance,
+            id: 2,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        client::Error::Rejected(ErrorCode::Internal, _)
+    ));
+    // Only the last durable snapshot may be published by fail-closed handling.
+    loop {
+        let s = feed.next().await.unwrap();
+        assert!(s.jobs.iter().any(|j| j.id == 2));
+        if s.shutting_down {
+            break;
+        }
+    }
+    fs::remove_dir(&journal).unwrap();
+    timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(status) = service.child.try_wait().unwrap() {
+                assert!(!status.success());
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    service.child = Service::command(&service.root).spawn().unwrap();
+    let recovered = service.ready().await;
+    assert_eq!(recovered.jobs.len(), 2);
+    assert_eq!(recovered.jobs[1].id, 2);
+    assert_eq!(recovered.jobs[1].result, Some(Finished::Interrupted));
+    assert!(
+        !service
+            .root
+            .path()
+            .join("downloads/queued.bin.part")
+            .exists()
+    );
     service.shutdown().await;
 }

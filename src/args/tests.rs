@@ -581,3 +581,11 @@ fn managed_pause_requires_an_instance_handle_and_no_download_flags() {
         assert!(Cli::try_parse_from(args).is_err());
     }
 }
+
+#[test]
+fn jobs_remove_help_describes_forgetting_not_retryable_cancellation() {
+    let help = render_help(&["rdm", "jobs", "remove"]);
+    assert!(help.contains("queued or finished service job"));
+    assert!(help.contains("never delete files"));
+    assert!(!help.contains("retains a cancelled history record"));
+}

@@ -385,13 +385,35 @@ impl Manager {
                 self.publish(events);
                 Ok(Response::Snapshot(self.snapshot()))
             }
-            request @ (Request::Cancel { .. } | Request::RemoveQueued { .. }) => {
-                let queued_only = matches!(request, Request::RemoveQueued { .. });
-                let (Request::Cancel { instance, id } | Request::RemoveQueued { instance, id }) =
-                    request
-                else {
-                    unreachable!()
+            Request::Remove { instance, id } => {
+                if instance != self.instance {
+                    return Ok(error(
+                        ErrorCode::StaleInstance,
+                        "The service restarted. Reconnect before issuing commands.",
+                    ));
+                }
+                let Some(index) = self.jobs.iter().position(|m| m.job.id == id) else {
+                    return Ok(error(
+                        ErrorCode::NotFound,
+                        "That download is no longer retained.",
+                    ));
                 };
+                // Recheck in the actor: a queued job may have been promoted
+                // since the UI snapshot. Never forget an unjoined worker.
+                if self.jobs[index].job.running() {
+                    return Ok(error(
+                        ErrorCode::Invalid,
+                        "Cancel the running download and wait for cleanup before removing it.",
+                    ));
+                }
+                // Drop the complete record, including URL-bearing retry input.
+                // No output/partial/checkpoint path is opened or deleted here.
+                self.jobs.remove(index);
+                self.persist().await?;
+                self.publish(events);
+                Ok(Response::Snapshot(self.snapshot()))
+            }
+            Request::Cancel { instance, id } => {
                 if instance != self.instance {
                     return Ok(error(
                         ErrorCode::StaleInstance,
@@ -404,12 +426,6 @@ impl Manager {
                         "That download is no longer retained.",
                     ));
                 };
-                if queued_only && !managed.job.queued && !managed.job.held() {
-                    return Ok(error(
-                        ErrorCode::Invalid,
-                        "Only queued, paused or interrupted jobs can be removed. Use cancel for a running download.",
-                    ));
-                }
                 if managed.job.queued || managed.job.held() {
                     managed.job.queued = false;
                     managed.job.result = Some(Finished::Cancelled);
@@ -718,5 +734,122 @@ mod pause_tests {
         assert!(m.jobs[0].job.cancelling);
         m.finish(1, Finished::Cancelled, &events).await.unwrap();
         assert_eq!(m.jobs[0].job.result, Some(Finished::Cancelled));
+    }
+    #[tokio::test]
+    async fn remove_forgets_queued_and_all_terminal_kinds_durably() {
+        for outcome in [
+            None,
+            Some(Finished::Paused),
+            Some(Finished::Interrupted),
+            Some(Finished::Cancelled),
+            Some(Finished::Failed("test".into())),
+            Some(Finished::Completed {
+                path: "/tmp/file.bin".into(),
+                bytes: 17,
+            }),
+            Some(Finished::AlreadyPresent {
+                path: "/tmp/file.bin".into(),
+            }),
+        ] {
+            let (root, mut m, events) = manager().await;
+            let job = &mut m.jobs[0];
+            job.job.pausing = false;
+            job.job.queued = outcome.is_none();
+            if matches!(
+                outcome,
+                Some(Finished::Completed { .. } | Finished::AlreadyPresent { .. })
+            ) {
+                job.input = None;
+            }
+            job.job.retryable = outcome.is_some() && job.input.is_some();
+            job.job.result = outcome;
+            m.persist().await.unwrap();
+            let mut workers = JoinSet::new();
+            let response = m
+                .command(
+                    Request::Remove {
+                        instance: "test".into(),
+                        id: 1,
+                    },
+                    &mut workers,
+                    &events,
+                )
+                .await
+                .unwrap();
+            assert!(matches!(response, Response::Snapshot(s) if s.jobs.is_empty()));
+            assert!(events.borrow().jobs.is_empty());
+            assert!(m.jobs.is_empty());
+            assert!(workers.is_empty());
+            assert_eq!(m.next_id, 2, "removal must not recycle handles");
+            let missing = m
+                .command(
+                    Request::Retry {
+                        instance: "test".into(),
+                        id: 1,
+                    },
+                    &mut workers,
+                    &events,
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                missing,
+                Response::Error {
+                    code: ErrorCode::NotFound,
+                    ..
+                }
+            ));
+            drop(m);
+            let (_store, saved) = Store::open(root.path().join("rdm/service")).await.unwrap();
+            assert!(
+                saved.records.is_empty(),
+                "URL/input must not recover as retryable history"
+            );
+            assert_eq!(saved.next_id, 2);
+        }
+    }
+    #[tokio::test]
+    async fn remove_rechecks_generation_and_never_forgets_a_draining_worker() {
+        let (_root, mut m, events) = manager().await;
+        for (instance, code) in [
+            ("stale", ErrorCode::StaleInstance),
+            ("test", ErrorCode::Invalid),
+        ] {
+            let response = m
+                .command(
+                    Request::Remove {
+                        instance: instance.into(),
+                        id: 1,
+                    },
+                    &mut JoinSet::new(),
+                    &events,
+                )
+                .await
+                .unwrap();
+            assert!(matches!(response, Response::Error { code: actual, .. } if actual == code));
+            assert_eq!(m.jobs.len(), 1);
+            assert!(!m.jobs[0].cancel.is_cancelled());
+        }
+        m.jobs[0].job.pausing = false;
+        m.jobs[0].job.cancelling = true;
+        let response = m
+            .command(
+                Request::Remove {
+                    instance: "test".into(),
+                    id: 1,
+                },
+                &mut JoinSet::new(),
+                &events,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            response,
+            Response::Error {
+                code: ErrorCode::Invalid,
+                ..
+            }
+        ));
+        assert_eq!(m.jobs.len(), 1);
     }
 }

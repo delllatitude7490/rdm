@@ -66,7 +66,7 @@ with tempfile.TemporaryDirectory(prefix='rdm-cli-test-') as name:
         with socket.socket(socket.AF_UNIX) as stream:
             stream.settimeout(8)
             stream.connect(str(sock))
-            data = json.dumps({'version': 5, 'body': command}).encode()
+            data = json.dumps({'version': 6, 'body': command}).encode()
             stream.sendall(struct.pack('>I', len(data)) + data)
             size = struct.unpack('>I', receive(stream, 4))[0]
             return json.loads(receive(stream, size))['body']
@@ -126,10 +126,11 @@ with tempfile.TemporaryDirectory(prefix='rdm-cli-test-') as name:
         assert not (root / 'downloads/queued.bin.part').exists()
         cli('jobs', 'remove', handle, ok=False)  # never remove a running job
         cli('jobs', 'remove', queued_handle)
-        assert json.loads(cli('jobs', 'inspect', queued_handle, '--json').stdout)['result'] == 'Cancelled'
+        cli('jobs', 'inspect', queued_handle, '--json', ok=False)
+        assert all(j['id'] != queued['id'] for j in state()['jobs'])
         assert json.loads(cli('jobs', 'inspect', handle, '--json').stdout)['id'] == s['jobs'][-1]['id']
         cli('jobs', 'cancel', handle)
-        until(lambda s: s['jobs'][-2]['result'] == 'Cancelled')
+        until(lambda s: s['jobs'][-1]['result'] == 'Cancelled')
         # Retry the same cancelled URL/output; partial state remains engine-owned.
         cli('download', url, '--allow-private', '-q', '-o', 'detached.bin')
         assert (root / 'downloads/detached.bin').read_bytes() == PAYLOAD

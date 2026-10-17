@@ -56,7 +56,7 @@ with tempfile.TemporaryDirectory(prefix='rdm-shared-queue-') as name:
     def ipc(command):
         with socket.socket(socket.AF_UNIX) as s:
             s.settimeout(8); s.connect(str(runtime/'rdm/service.sock'))
-            data = json.dumps({'version': 5, 'body': command}).encode()
+            data = json.dumps({'version': 6, 'body': command}).encode()
             s.sendall(struct.pack('>I', len(data))+data)
             size = struct.unpack('>I', receive(s, 4))[0]
             response = json.loads(receive(s, size))['body']
@@ -104,10 +104,11 @@ with tempfile.TemporaryDirectory(prefix='rdm-shared-queue-') as name:
         assert waiter.returncode != 0 and 'cancelled' in err.lower(), (out,err)
         s = state()
         assert s['jobs'][0]['result'] is None, 'queued cancellation must not cancel running job'
-        assert s['jobs'][1]['result'] == s['jobs'][3]['result'] == 'Cancelled'
+        assert [j['id'] for j in s['jobs']] == [1,3,4]
+        assert s['jobs'][2]['result'] == 'Cancelled'
         GATE.set()
-        done = until(lambda s: s['jobs'][2]['result'] is not None)
-        assert 'Completed' in done['jobs'][0]['result'] and 'Completed' in done['jobs'][2]['result'], done
+        done = until(lambda s: s['jobs'][1]['result'] is not None)
+        assert 'Completed' in done['jobs'][0]['result'] and 'Completed' in done['jobs'][1]['result'], done
         assert (downloads/'first.bin').read_bytes() == (downloads/'native.bin').read_bytes() == PAYLOAD
         assert all(path not in ('/gui.bin','/waiter.bin') for _,path in REQUESTS)
         # Attached CLI can queue and then complete normally after a predecessor.
@@ -115,7 +116,7 @@ with tempfile.TemporaryDirectory(prefix='rdm-shared-queue-') as name:
         cli('download',base+'/blocker.bin','--detach','-q')
         waiting = subprocess.Popen([str(BIN/'rdm'),'download',base+'/attached.bin','-q'], env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         children.append(waiting)
-        until(lambda s: len(s['jobs']) == 6 and s['jobs'][-1]['queued'])
+        until(lambda s: len(s['jobs']) == 5 and s['jobs'][-1]['queued'])
         GATE.set()
         out,err = waiting.communicate(timeout=15)
         assert waiting.returncode == 0, (out,err)

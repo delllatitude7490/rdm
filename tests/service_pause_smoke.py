@@ -72,7 +72,7 @@ with tempfile.TemporaryDirectory(prefix='rdm-pause-') as name:
     def ipc(command):
         with socket.socket(socket.AF_UNIX) as s:
             s.settimeout(10); s.connect(str(sock))
-            data = json.dumps({'version':5, 'body':command}).encode()
+            data = json.dumps({'version':6, 'body':command}).encode()
             s.sendall(struct.pack('>I',len(data))+data)
             size = struct.unpack('>I',receive(s,4))[0]
             result = json.loads(receive(s,size))['body']
@@ -158,7 +158,8 @@ with tempfile.TemporaryDirectory(prefix='rdm-pause-') as name:
         assert any(m=='GET' and '/range.bin' in p and off>0 for m,p,off in REQUESTS[before:]), 'expected byte-range continuation'
         assert job(3)['result']=='Paused'
         cli('jobs','remove',handle(3))
-        assert job(3)['result']=='Cancelled'
+        assert all(j['id'] != 3 for j in state()['jobs'])
+        cli('jobs','resume',handle(3),ok=False)
         assert not (downloads/'held.bin.part').exists()
         # No-range server: never append a full response to a retained prefix.
         plain=cli('download',base+'/no-range.bin','--allow-private','--detach','-q').stdout.strip()
