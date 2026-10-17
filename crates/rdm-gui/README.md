@@ -33,7 +33,13 @@ workspace default; normal CLI-only builds do not build Iced or the service.
 ## Current behaviour
 
 - Direct HTTP/HTTPS URL, destination-folder text field, optional filename.
-- One active managed download across all clients, not one per window.
+- One running managed download across all clients, not one per window.
+- Further submissions enter the shared FIFO queue. Inputs remain editable while
+  work runs; the button becomes **Add to queue**. Confirmed submission clears
+  URL/filename; an unconfirmed or rejected submission does not.
+- Separate **Downloading**, **Queued** (FIFO positions) and **Finished** sections.
+  Remove queued jobs without touching output; cancel running jobs safely.
+  The next job starts only after the previous engine worker has fully cleaned up.
 - Coalesced service progress, sampled speed, known/unknown totals and outcomes.
 - **Closing the window leaves downloads running. Reopening reconnects to the
   same service and shows current records.** No transfer future/token lives here.
@@ -50,7 +56,7 @@ workspace default; normal CLI-only builds do not build Iced or the service.
 
 Records are capped at 64 and are **not durable**. Restarting the service clears
 in-memory records; existing partial files are not automatically restarted. The
-GUI explains a detected service-instance change. A concurrent queue/history UI,
+GUI explains a detected service-instance change. Parallel downloads, durable queue/history,
 provider/SFTP routing, graphical folder picker, pause, tray and installer remain
 future milestones. Firefox explicit handoff is available separately.
 

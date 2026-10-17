@@ -88,7 +88,7 @@ fn status_does_not_spawn_service_and_validation_does_not_echo_input() {
 
 #[test]
 fn actual_host_frames_translate_url_only_and_never_retry_mutations() {
-    for mode in ["accepted", "busy", "lost"] {
+    for mode in ["accepted", "queued", "busy", "lost"] {
         let root = root();
         let dir = root.path().join("rdm");
         fs::create_dir(&dir).unwrap();
@@ -138,6 +138,7 @@ fn actual_host_frames_translate_url_only_and_never_retry_mutations() {
                         label: "file".into(),
                         destination: "/tmp/service-default/file".into(),
                         progress: Default::default(),
+                        queued: mode == "queued",
                         cancelling: false,
                         result: None,
                     });
@@ -182,7 +183,7 @@ fn actual_host_frames_translate_url_only_and_never_retry_mutations() {
             response.code,
             if mode == "lost" { "uncertain" } else { mode }
         );
-        if mode == "accepted" {
+        if mode == "accepted" || mode == "queued" {
             assert_eq!(response.job_id, Some(7));
         }
         server.join().unwrap();

@@ -6,7 +6,7 @@ pub mod wire;
 
 use serde::{Deserialize, Serialize};
 
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 pub const MAX_FRAME: usize = 1024 * 1024;
 pub const MAX_JOBS: usize = 64;
 pub type JobId = u64;
@@ -48,6 +48,7 @@ pub enum Request {
     List,
     Subscribe,
     Cancel { instance: String, id: JobId },
+    RemoveQueued { instance: String, id: JobId },
     Shutdown { instance: String },
 }
 
@@ -107,12 +108,20 @@ pub struct Job {
     pub label: String,
     pub destination: String,
     pub progress: Progress,
+    /// Accepted but not started. Queued jobs have no engine or filesystem work.
+    // Allows decoding an old snapshot only to report its version mismatch.
+    #[serde(default)]
+    pub queued: bool,
     pub cancelling: bool,
     pub result: Option<Finished>,
 }
 impl Job {
+    /// Unfinished, including queued jobs (not a count of running workers).
     pub fn active(&self) -> bool {
         self.result.is_none()
+    }
+    pub fn running(&self) -> bool {
+        self.active() && !self.queued
     }
 }
 

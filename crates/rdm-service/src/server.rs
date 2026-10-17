@@ -21,6 +21,8 @@ struct Managed {
     job: Job,
     sink: GuiSink,
     cancel: CancellationToken,
+    // URL-bearing input is private, held only while queued and never serialized.
+    input: Option<transfer::Input>,
 }
 struct Command {
     request: Request,
@@ -59,7 +61,11 @@ impl Manager {
     fn stop(&mut self, events: &watch::Sender<Snapshot>) {
         self.stopping = true;
         for managed in &mut self.jobs {
-            if managed.job.active() {
+            if managed.job.queued {
+                managed.input.take();
+                managed.job.queued = false;
+                managed.job.result = Some(Finished::Cancelled);
+            } else if managed.job.running() {
                 managed.job.cancelling = true;
                 managed.cancel.cancel();
             }
@@ -68,7 +74,7 @@ impl Manager {
     }
     fn refresh(&mut self, events: &watch::Sender<Snapshot>) {
         for managed in &mut self.jobs {
-            if managed.job.active() {
+            if managed.job.running() {
                 managed.job.progress = managed.sink.snapshot();
             }
         }
@@ -83,6 +89,7 @@ impl Manager {
                 managed.job.progress.downloaded = *bytes;
                 managed.job.progress.total = Some(*bytes);
             }
+            managed.job.queued = false;
             managed.job.result = Some(result);
             managed.job.cancelling = false;
             self.publish(events);
@@ -96,15 +103,6 @@ impl Manager {
     ) -> Response {
         if self.stopping {
             return error(ErrorCode::ShuttingDown, "The service is shutting down.");
-        }
-        // This milestone deliberately admits ONE managed transfer. This protects
-        // even aliases and engine-selected Content-Disposition filenames from
-        // simultaneous managed writes. A concurrent queue is a later milestone.
-        if self.jobs.iter().any(|m| m.job.active()) {
-            return error(
-                ErrorCode::Busy,
-                "A managed download is already active. Cancel it or wait for completion.",
-            );
         }
         let prepared = match request {
             Request::Add(add) => transfer::prepare(
@@ -125,8 +123,16 @@ impl Manager {
                 };
             }
         };
-        while self.jobs.len() >= MAX_JOBS {
-            self.jobs.pop_front();
+        if self.jobs.len() >= MAX_JOBS {
+            // Evict only terminal history. Never lose running/queued work or
+            // secretly replace a pending request when the bounded queue fills.
+            let Some(index) = self.jobs.iter().position(|m| !m.job.active()) else {
+                return error(
+                    ErrorCode::Busy,
+                    "The service queue is full (64 unfinished jobs). Remove a queued job or wait.",
+                );
+            };
+            self.jobs.remove(index);
         }
         let id = self.next_id;
         self.next_id += 1;
@@ -138,15 +144,33 @@ impl Manager {
                 label: input.label.clone(),
                 destination: input.request.output.clone().unwrap_or_default(),
                 progress: Default::default(),
+                queued: true,
                 cancelling: false,
                 result: None,
             },
             sink: sink.clone(),
-            cancel: cancel.clone(),
+            cancel,
+            input: Some(input),
         });
-        workers.spawn(async move { (id, transfer::download(input, sink, cancel).await) });
+        self.start_next(workers);
         self.publish(events);
         Response::Snapshot(self.snapshot())
+    }
+    /// The actor is the only scheduler. A worker must be joined (and therefore
+    /// fully cleaned up) before the next FIFO input is moved into the engine.
+    fn start_next(&mut self, workers: &mut JoinSet<(u64, Finished)>) {
+        if self.stopping || !workers.is_empty() {
+            return;
+        }
+        let Some(managed) = self.jobs.iter_mut().find(|m| m.job.queued) else {
+            return;
+        };
+        let input = managed.input.take().expect("queued job owns private input");
+        managed.job.queued = false;
+        let id = managed.job.id;
+        let sink = managed.sink.clone();
+        let cancel = managed.cancel.clone();
+        workers.spawn(async move { (id, transfer::download(input, sink, cancel).await) });
     }
     fn command(
         &mut self,
@@ -157,7 +181,13 @@ impl Manager {
         match request {
             Request::List | Request::Subscribe => Response::Snapshot(self.snapshot()),
             request @ (Request::Add(_) | Request::AddCli(_)) => self.add(request, workers, events),
-            Request::Cancel { instance, id } => {
+            request @ (Request::Cancel { .. } | Request::RemoveQueued { .. }) => {
+                let queued_only = matches!(request, Request::RemoveQueued { .. });
+                let (Request::Cancel { instance, id } | Request::RemoveQueued { instance, id }) =
+                    request
+                else {
+                    unreachable!()
+                };
                 if instance != self.instance {
                     return error(
                         ErrorCode::StaleInstance,
@@ -170,7 +200,20 @@ impl Manager {
                         "That download is no longer in service memory.",
                     );
                 };
-                if managed.job.active() {
+                if queued_only && !managed.job.queued {
+                    return error(
+                        ErrorCode::Invalid,
+                        "Only queued jobs can be removed. Use cancel for a running download.",
+                    );
+                }
+                if managed.job.queued {
+                    // Retain a terminal record so attached CLI waiters receive
+                    // an honest cancellation, rather than an unknown missing ID.
+                    managed.input.take();
+                    managed.job.queued = false;
+                    managed.job.result = Some(Finished::Cancelled);
+                    self.publish(events);
+                } else if managed.job.running() {
                     managed.job.cancelling = true;
                     managed.cancel.cancel();
                     self.publish(events);
@@ -308,11 +351,13 @@ pub async fn serve(
                 match result {
                     Ok((id, result)) => manager.finish(id, result, &events),
                     Err(_) => {
-                        if let Some(id) = manager.jobs.iter().find(|m| m.job.active()).map(|m| m.job.id) {
+                        if let Some(id) = manager.jobs.iter().find(|m| m.job.running()).map(|m| m.job.id) {
                             manager.finish(id, Finished::Failed("The download worker stopped unexpectedly.".into()), &events);
                         }
                     }
                 }
+                manager.start_next(&mut workers);
+                manager.publish(&events);
             }
             _ = tick.tick(), if !workers.is_empty() => manager.refresh(&events),
             _ = external_stop.cancelled(), if !manager.stopping => manager.stop(&events),

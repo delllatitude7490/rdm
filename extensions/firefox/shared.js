@@ -25,9 +25,10 @@ export function fileUrl(value) {
 // paths or arbitrary messages returned by another process.
 export const MESSAGES = Object.freeze({
   accepted: "Accepted by RDM. Open the GUI for progress; this does not mean the download has finished.",
+  queued: "Queued in RDM. Open the GUI for position and progress; it has not started yet.",
   ready: "RDM is connected and ready for a link.",
   active: "RDM is connected. A download is active; open the GUI for progress.",
-  busy: "Another download is active. Wait or cancel it in the RDM GUI.",
+  busy: "RDM is handling another request or the service queue is full. Check the GUI before retrying.",
   stopping: "RDM is shutting down. Wait before sending another link.",
   invalid: "RDM refused the link or destination. Use a direct public HTTP/HTTPS file URL. Provider shares are not supported.",
   runtime: "Cannot access RDM's private socket. Check XDG_RUNTIME_DIR and permissions.",
@@ -41,7 +42,7 @@ export const MESSAGES = Object.freeze({
   bridge: "Bridge unavailable or reply lost. Check RDM before retrying. For first-time setup, run rdm-native-host --install.",
   private: "Private browsing is not supported by this preview. Use a regular window.",
 });
-const SUCCESS = new Set(["accepted", "ready", "active"]);
+const SUCCESS = new Set(["accepted", "queued", "ready", "active"]);
 export function result(code) {
   if (!Object.hasOwn(MESSAGES, code)) code = "uncertain";
   return { ok: SUCCESS.has(code), code, message: MESSAGES[code] };

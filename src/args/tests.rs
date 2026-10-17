@@ -548,3 +548,11 @@ fn managed_flags_and_commands_have_narrow_scope() {
     }
     assert!(Cli::try_parse_from(["rdm", "jobs", "inspect", "123-456:1", "--json"]).is_ok());
 }
+
+#[test]
+fn service_queue_removal_uses_full_handles_not_legacy_numeric_ids() {
+    assert!(Cli::try_parse_from(["rdm", "jobs", "remove", "123-456:7"]).is_ok());
+    assert!(Cli::try_parse_from(["rdm", "jobs", "remove", "7"]).is_err());
+    assert!(Cli::try_parse_from(["rdm", "queue", "remove", "7"]).is_ok());
+    assert!(Cli::try_parse_from(["rdm", "queue", "remove", "123-456:7"]).is_err());
+}

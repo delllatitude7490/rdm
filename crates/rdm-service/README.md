@@ -48,9 +48,10 @@ headless sessions can set it to a freshly created private directory.
 
 ## Commands and events
 
-The `rdm-ipc` crate defines Add, AddCli, List, Subscribe, Cancel and Shutdown. Traffic is
-length-prefixed JSON with internal protocol version 2 and a 1 MiB frame limit.
-Add input has separate URL/destination length limits. Cancel/Shutdown include
+The `rdm-ipc` crate defines Add, AddCli, List, Subscribe, Cancel, RemoveQueued
+and Shutdown. Traffic is length-prefixed JSON with internal protocol version 3
+and a 1 MiB frame limit.
+Add input has separate URL/destination length limits. Cancel/RemoveQueued/Shutdown include
 the service instance ID so stale clients cannot target reused job IDs.
 
 Each subscription starts with a complete snapshot, then receives coalesced
@@ -74,10 +75,19 @@ operation can delay it; there is no unsafe forced-abort button.
 
 ## Deliberate limits
 
-- One active **managed** download at a time, shared by all GUI/IPC clients.
-  Other Adds return Busy, not a hidden queue. This also prevents simultaneous
-  managed writes when directory aliases or server-selected filenames coincide.
-- At most 64 recent records, in memory only; oldest terminal records are evicted.
+- One running **managed** worker at a time, shared by CLI, GUI and Firefox.
+  Further validated Adds are held privately in FIFO order; queued work performs
+  no network/filesystem operations until promoted. The actor starts the next
+  worker only after joining the previous one, including cancellation cleanup.
+  This prevents simultaneous managed writes even through aliases or server names.
+- At most 64 total records, in memory only; oldest terminal records are evicted.
+  Unfinished records are never evicted. At 64 unfinished jobs, new Adds get Busy
+  with queue-full feedback. Cancelling/removing a queued item frees capacity; its
+  cancelled history record remains until ordinary terminal eviction.
+- Cancel targets queued or running jobs. RemoveQueued is queued-only, rejecting
+  a promotion race; it never unexpectedly cancels a running job. Both are
+  instance-qualified and never automatically retried. Shutdown discards all
+  queued inputs, publishes their cancelled results and drains the running worker.
   Reopening the GUI reconnects to these records while the same service lives.
 - A service restart creates a new instance and an empty record list. It does not
   invent restored history or automatically restart downloads. Existing engine
@@ -93,7 +103,9 @@ operation can delay it; there is no unsafe forced-abort button.
   SFTP and userinfo credentials are still refused. Firefox explicit link handoff
   is available through the separate `rdm-native-host` preview; see
   [Firefox setup](../../extensions/firefox/README.md).
-- No per-file pause, multi-download scheduler, durable history or queue controls.
+- No parallel managed downloads, per-file pause, durable queue/history or replay.
+  The existing persisted CLI queue remains separate; no automatic import or
+  migration of provider/listing/sync workflows is performed.
 - The service loads existing config once at startup, retaining parse errors and
   existing network/file-safety rules. Restart it to apply config/environment
   changes (CLI output/connections/private opt-in are explicit per-job exceptions).
@@ -126,4 +138,5 @@ CLI process-level coverage (matching binaries required):
 cargo build -p rdm -p rdm-service -p rdm-native-host --locked
 python3 tests/cli_service_smoke.py target/debug
 python3 tests/cli_protocol_smoke.py target/debug
+python3 tests/service_queue_smoke.py target/debug
 ```

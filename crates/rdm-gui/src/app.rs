@@ -30,6 +30,7 @@ impl Tracked {
             Some(Finished::AlreadyPresent { .. }) => "Already exists — file left unchanged",
             Some(Finished::Cancelled) => "Cancelled",
             Some(Finished::Failed(_)) => "Failed",
+            None if self.record.queued => "Queued — waiting for its turn",
             None if self.record.cancelling => "Cancelling safely…",
             None => match self.record.progress.phase {
                 Phase::Waiting => "Preparing",
@@ -55,6 +56,7 @@ pub enum Message {
         epoch: u64,
         instance: String,
         result: Result<Snapshot, client::Error>,
+        submitted: bool,
     },
 }
 impl App {
@@ -73,7 +75,7 @@ impl App {
         }
     }
     fn active(&self) -> bool {
-        self.jobs.iter().any(|j| j.record.active())
+        self.jobs.iter().any(|j| j.record.running())
     }
     fn stopping(&self) -> bool {
         self.snapshot.as_ref().is_some_and(|s| s.shutting_down)
@@ -104,7 +106,7 @@ impl App {
                 speed: None,
             });
             tracked.record = record.clone();
-            if record.active() {
+            if record.running() {
                 tracked.rate.record(record.progress.downloaded);
                 tracked.speed = tracked.rate.per_second();
             } else {
@@ -125,11 +127,13 @@ impl App {
         let epoch = self.epoch;
         self.pending = true;
         self.error = None;
+        let submitted = matches!(request, Request::Add(_));
         Task::perform(client::request(request), move |result| {
             Message::ActionDone {
                 epoch,
                 instance: instance.clone(),
                 result,
+                submitted,
             }
         })
     }
@@ -170,6 +174,7 @@ impl App {
                 epoch,
                 instance,
                 result,
+                submitted,
             } if epoch == self.epoch
                 && self
                     .snapshot
@@ -179,20 +184,24 @@ impl App {
                 self.pending = false;
                 match result {
                     Ok(snapshot) if self.connected && snapshot.instance == instance => {
-                        self.apply(snapshot)
+                        self.apply(snapshot);
+                        if submitted {
+                            self.url = SecretUrl::new("");
+                            self.filename.clear();
+                        }
                     }
                     Ok(_) => {}
                     Err(error) => self.error = Some(error.to_string()),
                 }
             }
-            Message::UrlChanged(value) if !self.active() && !self.pending => self.url = value,
-            Message::DirectoryChanged(value) if !self.active() && !self.pending => {
+            Message::UrlChanged(value) if !self.pending && !self.stopping() => self.url = value,
+            Message::DirectoryChanged(value) if !self.pending && !self.stopping() => {
                 self.directory = value
             }
-            Message::FilenameChanged(value) if !self.active() && !self.pending => {
+            Message::FilenameChanged(value) if !self.pending && !self.stopping() => {
                 self.filename = value
             }
-            Message::Start if self.connected && !self.active() && !self.stopping() => {
+            Message::Start if self.connected && !self.stopping() => {
                 return self.send(Request::Add(Add {
                     url: self.url.as_str().to_owned(),
                     directory: self.directory.clone(),
@@ -201,9 +210,20 @@ impl App {
             }
             Message::Cancel(id) if self.connected && !self.stopping() => {
                 if let Some(snapshot) = &self.snapshot {
-                    return self.send(Request::Cancel {
-                        instance: snapshot.instance.clone(),
-                        id,
+                    let queued = self
+                        .jobs
+                        .iter()
+                        .any(|j| j.record.id == id && j.record.queued);
+                    return self.send(if queued {
+                        Request::RemoveQueued {
+                            instance: snapshot.instance.clone(),
+                            id,
+                        }
+                    } else {
+                        Request::Cancel {
+                            instance: snapshot.instance.clone(),
+                            id,
+                        }
                     });
                 }
             }
@@ -226,7 +246,7 @@ impl App {
         ])
     }
     pub fn view(&self) -> Element<'_, Message> {
-        let editable = self.connected && !self.active() && !self.pending && !self.stopping();
+        let editable = self.connected && !self.pending && !self.stopping();
         let mut url = text_input("https://example.com/file.zip", self.url.as_str()).padding(12);
         let mut directory = text_input("/home/you/Downloads", &self.directory).padding(12);
         let mut filename = text_input("Automatic from URL", &self.filename).padding(12);
@@ -237,9 +257,16 @@ impl App {
             directory = directory.on_input(Message::DirectoryChanged);
             filename = filename.on_input(Message::FilenameChanged);
         }
-        let mut start = button(text("Start download").size(15))
-            .padding([11, 18])
-            .height(44);
+        let mut start = button(
+            text(if self.active() {
+                "Add to queue"
+            } else {
+                "Start download"
+            })
+            .size(15),
+        )
+        .padding([11, 18])
+        .height(44);
         if editable && !self.url.as_str().trim().is_empty() {
             start = start.on_press(Message::Start);
         }
@@ -275,7 +302,9 @@ impl App {
             ]
             .spacing(14),
             row![
-                text("Direct HTTP / HTTPS files").size(12).color(MUTED),
+                text("Direct HTTP / HTTPS · one download at a time")
+                    .size(12)
+                    .color(MUTED),
                 iced::widget::space().width(Fill),
                 start,
             ]
@@ -319,8 +348,27 @@ impl App {
             .align_y(iced::Alignment::Center),
         );
         if !self.jobs.is_empty() {
-            for job in self.jobs.iter().rev() {
-                content = content.push(self.job_view(job));
+            for section in ["Downloading", "Queued", "Finished"] {
+                let selected = |job: &&Tracked| match section {
+                    "Downloading" => job.record.running(),
+                    "Queued" => job.record.queued,
+                    _ => !job.record.active(),
+                };
+                if self.jobs.iter().any(|j| selected(&j)) {
+                    let count = self.jobs.iter().filter(selected).count();
+                    content =
+                        content.push(text(format!("{section} · {count}")).size(17).color(MUTED));
+                    if section == "Finished" {
+                        for job in self.jobs.iter().rev().filter(selected) {
+                            content = content.push(self.job_view(job));
+                        }
+                    } else {
+                        // Running first, then queued in FIFO order, never reverse.
+                        for job in self.jobs.iter().filter(selected) {
+                            content = content.push(self.job_view(job));
+                        }
+                    }
+                }
             }
         } else {
             content = content.push(
@@ -376,15 +424,35 @@ impl App {
             && !self.stopping()
         {
             heading = heading.push(
-                button("Cancel")
-                    .on_press(Message::Cancel(job.record.id))
-                    .height(44)
-                    .padding([8, 16])
-                    .style(button::secondary),
+                button(if job.record.queued {
+                    "Remove"
+                } else {
+                    "Cancel"
+                })
+                .on_press(Message::Cancel(job.record.id))
+                .height(44)
+                .padding([8, 16])
+                .style(button::secondary),
             );
         }
         let mut card = column![heading].spacing(14);
-        if !matches!(job.record.result, Some(Finished::AlreadyPresent { .. })) {
+        if job.record.queued {
+            let position = self
+                .jobs
+                .iter()
+                .filter(|j| j.record.queued)
+                .position(|j| j.record.id == job.record.id)
+                .map(|n| n + 1)
+                .unwrap_or(1);
+            card = card.push(
+                text(format!(
+                    "Queue position {position} · starts after earlier downloads finish"
+                ))
+                .size(12)
+                .color(MUTED),
+            );
+            card = card.push(text(&job.record.destination).size(12).color(MUTED));
+        } else if !matches!(job.record.result, Some(Finished::AlreadyPresent { .. })) {
             if let Some(fraction) = fraction(snapshot.downloaded, snapshot.total) {
                 card = card.push(progress_bar(0.0..=1.0, fraction).girth(5));
             } else {
@@ -458,6 +526,7 @@ mod tests {
                 label: "file.bin".into(),
                 destination: "/tmp/file.bin".into(),
                 progress: Default::default(),
+                queued: false,
                 cancelling: false,
                 result: None,
             }],
@@ -530,8 +599,51 @@ mod tests {
             epoch: 2,
             instance: "a".into(),
             result: Ok(state("a", 20)),
+            submitted: false,
         });
         assert_eq!(app.snapshot.unwrap().instance, "b");
         assert!(app.pending);
+    }
+    #[test]
+    fn form_remains_editable_while_running_and_queued_inputs_are_not_lost() {
+        let mut app = App::boot();
+        app.connected = true;
+        app.apply(state("a", 1));
+        let _ = app.update(Message::UrlChanged(SecretUrl::new(
+            "https://example.com/next.bin",
+        )));
+        assert_eq!(app.url.as_str(), "https://example.com/next.bin");
+        let _ = app.update(Message::DirectoryChanged("/tmp/next".into()));
+        assert_eq!(app.directory, "/tmp/next");
+        let mut queued = state("a", 2);
+        queued.jobs[0].queued = true;
+        app.apply(queued);
+        assert!(!app.active());
+        assert!(app.jobs[0].record.active());
+        assert_eq!(app.jobs[0].status(), "Queued — waiting for its turn");
+        assert!(app.jobs[0].speed.is_none());
+    }
+    #[test]
+    fn only_confirmed_submission_clears_url_and_filename() {
+        let mut app = App::boot();
+        app.connected = true;
+        app.apply(state("a", 1));
+        app.url = SecretUrl::new("https://example.com/next.bin");
+        app.filename = "next.bin".into();
+        let _ = app.update(Message::ActionDone {
+            epoch: 0,
+            instance: "a".into(),
+            result: Err(client::Error::Uncertain),
+            submitted: true,
+        });
+        assert!(!app.url.as_str().is_empty());
+        let _ = app.update(Message::ActionDone {
+            epoch: 0,
+            instance: "a".into(),
+            result: Ok(state("a", 2)),
+            submitted: true,
+        });
+        assert!(app.url.as_str().is_empty());
+        assert!(app.filename.is_empty());
     }
 }

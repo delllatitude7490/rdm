@@ -66,7 +66,7 @@ with tempfile.TemporaryDirectory(prefix='rdm-cli-test-') as name:
         with socket.socket(socket.AF_UNIX) as stream:
             stream.settimeout(8)
             stream.connect(str(sock))
-            data = json.dumps({'version': 2, 'body': command}).encode()
+            data = json.dumps({'version': 3, 'body': command}).encode()
             stream.sendall(struct.pack('>I', len(data)) + data)
             size = struct.unpack('>I', receive(stream, 4))[0]
             return json.loads(receive(stream, size))['body']
@@ -116,15 +116,20 @@ with tempfile.TemporaryDirectory(prefix='rdm-cli-test-') as name:
         assert ':' in handle and not p.stderr
         s = until(lambda s: s['jobs'][-1]['progress']['downloaded'] > 0)
         assert s['jobs'][-1]['result'] is None
-        # Admission shared with GUI Add and a second CLI; neither creates records.
+        # Explicit per-job private permission does not leak into browser Add.
         before = len(s['jobs'])
         gui = ipc({'command': 'add', 'data': {'url': url, 'directory': str(root), 'filename': 'gui.bin'}})
-        assert gui['type'] == 'error' and gui['data']['code'] == 'Busy'
-        cli('download', url, '--allow-private', '--detach', '-o', 'busy.bin', ok=False)
-        assert len(state()['jobs']) == before
+        assert gui['type'] == 'error' and gui['data']['code'] == 'Invalid'
+        queued_handle = cli('download', url, '--allow-private', '--detach', '-q', '-o', 'queued.bin').stdout.strip()
+        queued = json.loads(cli('jobs', 'inspect', queued_handle, '--json').stdout)
+        assert queued['queued'] and queued['progress']['downloaded'] == 0
+        assert not (root / 'downloads/queued.bin.part').exists()
+        cli('jobs', 'remove', handle, ok=False)  # never remove a running job
+        cli('jobs', 'remove', queued_handle)
+        assert json.loads(cli('jobs', 'inspect', queued_handle, '--json').stdout)['result'] == 'Cancelled'
         assert json.loads(cli('jobs', 'inspect', handle, '--json').stdout)['id'] == s['jobs'][-1]['id']
         cli('jobs', 'cancel', handle)
-        until(lambda s: s['jobs'][-1]['result'] == 'Cancelled')
+        until(lambda s: s['jobs'][-2]['result'] == 'Cancelled')
         # Retry the same cancelled URL/output; partial state remains engine-owned.
         cli('download', url, '--allow-private', '-q', '-o', 'detached.bin')
         assert (root / 'downloads/detached.bin').read_bytes() == PAYLOAD
@@ -163,7 +168,7 @@ with tempfile.TemporaryDirectory(prefix='rdm-cli-test-') as name:
         cli('jobs', 'cancel', handle, ok=False)
         assert state()['jobs'][-1]['result'] is None
         shutdown()
-        print('PASS CLI wait/detach, exact bytes, relative output, private opts, Busy/shared admission, inspect/cancel, SIGINT/SIGTERM drain, cancelled retry, client exit, config-independent jobs, stale handles and no-autostart queries')
+        print('PASS CLI wait/detach, exact bytes, relative output, private opts, queued admission/removal, inspect/cancel, SIGINT/SIGTERM drain, cancelled retry, client exit, config-independent jobs, stale handles and no-autostart queries')
     finally:
         for child in children:
             if child.poll() is None: child.kill(); child.wait(timeout=5)

@@ -18,7 +18,7 @@ The core user-facing workflows are:
   filter extensions and delete safe, verified orphans.
 - `rdm queue …`: persist, inspect, and process a download queue across
   invocations.
-- `rdm jobs list/inspect/cancel`: control shared-service direct downloads.
+- `rdm jobs list/inspect/cancel/remove`: control shared-service direct downloads.
 - `rdm config`: print the effective configuration.
 
 Read `README.md` and the relevant file in `extraInfo/` before changing a
@@ -73,7 +73,9 @@ is explicitly the purpose of the test.
    handles or carry fragments/query data that generic handling can corrupt.
 3. Generic direct HTTP/HTTPS CLI files submit to the per-user service, which
    owns `engine`; default CLI waits, `--detach` returns on acceptance. The GUI,
-   Firefox and CLI share one active job. Provider/SFTP, directory-shaped fallback,
+   Firefox and CLI share one running worker and a bounded in-memory FIFO. Queued
+   inputs do no network/file work before promotion; only terminal records may
+   be evicted. Cancellation must drain the worker before advancing. Provider/SFTP, directory-shaped fallback,
    sync and queue paths remain legacy and uncoordinated. Listings are discovered by
    `scrape` and become queue work. `sync` chooses its own hoster/SFTP/generic
    implementation because its metadata and deletion rules differ from a

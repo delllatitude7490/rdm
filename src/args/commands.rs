@@ -158,4 +158,6 @@ pub enum JobsCommand {
     },
     /// Request cancellation; the service drains the worker asynchronously
     Cancel { handle: crate::managed::Handle },
+    /// Remove a not-yet-started service job (retains a cancelled history record)
+    Remove { handle: crate::managed::Handle },
 }
