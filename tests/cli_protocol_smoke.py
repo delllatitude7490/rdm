@@ -55,7 +55,7 @@ for mode in ('version', 'lost-add', 'lost-feed', 'lost-cancel', 'unsafe-error', 
                             if command == 'add_cli': snapshot['jobs'] = [job]
                             if (mode == 'lost-add' and command == 'add_cli') or (mode == 'lost-cancel' and command == 'cancel'): continue
                             if mode == 'unsafe-error' and command == 'add_cli': job['result'] = {'Failed': '\x1b[2Junsafe\x07error'}
-                            data = json.dumps({'version': 1 if mode == 'version' else 4, 'body': {'type': 'snapshot', 'data': snapshot}}).encode()
+                            data = json.dumps({'version': 1 if mode == 'version' else 5, 'body': {'type': 'snapshot', 'data': snapshot}}).encode()
                             stream.sendall(struct.pack('>I', len(data)) + data)
                     server.settimeout(.3)
                     try:

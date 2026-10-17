@@ -68,7 +68,7 @@ with tempfile.TemporaryDirectory(prefix="rdm-firefox-test-") as name:
         with socket.socket(socket.AF_UNIX) as stream:
             stream.settimeout(5)
             stream.connect(str(socket_path))
-            data = json.dumps({"version": 4, "body": command}).encode()
+            data = json.dumps({"version": 5, "body": command}).encode()
             stream.sendall(struct.pack(">I", len(data))+data)
             size = struct.unpack(">I", receive(stream, 4))[0]
             assert 0 < size <= 1024*1024

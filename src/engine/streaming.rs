@@ -365,6 +365,7 @@ pub(super) async fn download_streaming(
     url: &str,
     output_path: &str,
     id: StreamIdentity<'_>,
+    protect_existing: bool,
     cancel: CancellationToken,
     sink: Arc<dyn ProgressSink>,
 ) -> Result<u64> {
@@ -377,7 +378,8 @@ pub(super) async fn download_streaming(
     // The existence question was already asked and answered further up; this
     // only records the answer, so that the rename at the end can tell an
     // approved overwrite from a file that turned up while we were downloading.
-    let destination_existed = tokio::fs::symlink_metadata(output_path).await.is_ok();
+    let destination_existed =
+        !protect_existing && tokio::fs::symlink_metadata(output_path).await.is_ok();
 
     // Resume: check existing .part file size.
     //
@@ -396,16 +398,16 @@ pub(super) async fn download_streaming(
     // manifest beside it is what says which resource those bytes came from,
     // and it is the same manifest the segmented path writes.
     let saved = resume::load(&meta_path).await.ok();
-    let (existing_bytes, if_range) =
-        match plan_streaming_resume(bytes_on_disk, saved.as_ref(), &id) {
-            StreamStart::Resume { offset, if_range } => (offset, Some(if_range)),
-            StreamStart::Fresh { discarded } => {
-                if let Some(reason) = discarded {
-                    sink.note(&format!("Restarting from zero: {}", reason));
-                }
-                (0, None)
+    let (existing_bytes, if_range) = match plan_streaming_resume(bytes_on_disk, saved.as_ref(), &id)
+    {
+        StreamStart::Resume { offset, if_range } => (offset, Some(if_range)),
+        StreamStart::Fresh { discarded } => {
+            if let Some(reason) = discarded {
+                sink.note(&format!("Restarting from zero: {}", reason));
             }
-        };
+            (0, None)
+        }
+    };
 
     // Phase 1: Build and send (possibly ranged, possibly conditional) request
     //
@@ -440,7 +442,9 @@ pub(super) async fn download_streaming(
             // that answers anyway does not get to decide.
             ResumeAction::Resume(_) => {
                 drop(resp);
-                sink.note("Server answered with a different version of the file, restarting from zero");
+                sink.note(
+                    "Server answered with a different version of the file, restarting from zero",
+                );
                 let fresh_resp = client
                     .get(url)
                     .send()
@@ -625,8 +629,10 @@ pub(super) async fn download_streaming(
         let chunk = tokio::select! {
             c = stream.next() => c,
             _ = cancel.cancelled() => {
-                writer.flush().await.ok();
-                anyhow::bail!("Download cancelled at {} bytes", downloaded);
+                writer.flush().await.context("Failed to flush paused partial file")?;
+                writer.get_ref().sync_data().await.context("Failed to sync paused partial file")?;
+                return Err(anyhow::Error::new(super::TransferCancelled)
+                    .context(format!("Download cancelled at {} bytes", downloaded)));
             }
         };
 
@@ -975,9 +981,7 @@ mod tests {
     fn a_partial_file_with_no_manifest_is_never_appended_to() {
         assert!(matches!(
             plan_streaming_resume(4096, None, &identity(Some("\"v1\""), None)),
-            StreamStart::Fresh {
-                discarded: Some(_)
-            }
+            StreamStart::Fresh { discarded: Some(_) }
         ));
     }
 
@@ -1000,9 +1004,7 @@ mod tests {
         let saved = streaming_manifest(Some("\"v1\""), None);
         assert!(matches!(
             plan_streaming_resume(4096, Some(&saved), &identity(Some("\"v2\""), None)),
-            StreamStart::Fresh {
-                discarded: Some(_)
-            }
+            StreamStart::Fresh { discarded: Some(_) }
         ));
     }
 
@@ -1013,17 +1015,13 @@ mod tests {
         let saved = streaming_manifest(Some("\"v1\""), None);
         assert!(matches!(
             plan_streaming_resume(4096, Some(&saved), &identity(None, None)),
-            StreamStart::Fresh {
-                discarded: Some(_)
-            }
+            StreamStart::Fresh { discarded: Some(_) }
         ));
 
         let no_validator = streaming_manifest(None, None);
         assert!(matches!(
             plan_streaming_resume(4096, Some(&no_validator), &identity(Some("\"v1\""), None)),
-            StreamStart::Fresh {
-                discarded: Some(_)
-            }
+            StreamStart::Fresh { discarded: Some(_) }
         ));
     }
 
@@ -1037,9 +1035,7 @@ mod tests {
         );
         assert!(matches!(
             plan_streaming_resume(4096, Some(&saved), &identity(Some("\"v1\""), None)),
-            StreamStart::Fresh {
-                discarded: Some(_)
-            }
+            StreamStart::Fresh { discarded: Some(_) }
         ));
     }
 
@@ -1052,9 +1048,7 @@ mod tests {
         saved.transfer = TransferKind::Segmented;
         assert!(matches!(
             plan_streaming_resume(4096, Some(&saved), &identity(Some("\"v1\""), None)),
-            StreamStart::Fresh {
-                discarded: Some(_)
-            }
+            StreamStart::Fresh { discarded: Some(_) }
         ));
     }
 
@@ -1064,7 +1058,8 @@ mod tests {
     fn a_206_that_carries_another_version_is_not_a_continuation() {
         fn response(etag: Option<&'static str>) -> reqwest::Response {
             use axum::http;
-            let mut builder = http::Response::builder().status(reqwest::StatusCode::PARTIAL_CONTENT);
+            let mut builder =
+                http::Response::builder().status(reqwest::StatusCode::PARTIAL_CONTENT);
             if let Some(etag) = etag {
                 builder = builder.header("etag", etag);
             }
@@ -1072,14 +1067,20 @@ mod tests {
         }
 
         let expected = Some("\"v1\"".to_owned());
-        assert!(body_continues_the_same_file(&response(Some("\"v1\"")), &expected));
+        assert!(body_continues_the_same_file(
+            &response(Some("\"v1\"")),
+            &expected
+        ));
         assert!(!body_continues_the_same_file(
             &response(Some("\"v2\"")),
             &expected
         ));
         // Nothing to compare against is not a pass.
         assert!(!body_continues_the_same_file(&response(None), &expected));
-        assert!(!body_continues_the_same_file(&response(Some("\"v1\"")), &None));
+        assert!(!body_continues_the_same_file(
+            &response(Some("\"v1\"")),
+            &None
+        ));
     }
 
     // ---------- End to end ----------
@@ -1155,6 +1156,7 @@ mod tests {
                 etag: Some("\"v2\""),
                 last_modified: None,
             },
+            true,
             CancellationToken::new(),
             crate::ui::silent(),
         )
@@ -1237,6 +1239,7 @@ mod tests {
                 etag: Some("\"v1\""),
                 last_modified: None,
             },
+            true,
             CancellationToken::new(),
             crate::ui::silent(),
         )

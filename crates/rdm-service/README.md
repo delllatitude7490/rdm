@@ -48,10 +48,10 @@ headless sessions can set it to a freshly created private directory.
 
 ## Commands and events
 
-The `rdm-ipc` crate defines Add, AddCli, List, Subscribe, Cancel, RemoveQueued, Retry
-and Shutdown. Traffic is length-prefixed JSON with internal protocol version 4
+The `rdm-ipc` crate defines Add, AddCli, List, Subscribe, Pause, Cancel, RemoveQueued, Retry
+and Shutdown. Traffic is length-prefixed JSON with internal protocol version 5
 and a 1 MiB frame limit.
-Add input has separate URL/destination length limits. Cancel/RemoveQueued/Retry/Shutdown include
+Add input has separate URL/destination length limits. Pause/Cancel/RemoveQueued/Retry/Shutdown include
 the service instance ID so stale clients cannot target reused job IDs.
 
 Each subscription starts with a complete snapshot, then receives coalesced
@@ -81,20 +81,21 @@ operation can delay it; there is no unsafe forced-abort button.
   worker only after joining the previous one, including cancellation cleanup.
   This prevents simultaneous managed writes even through aliases or server names.
 - At most 64 total records, persisted in SQLite; oldest terminal records are evicted
-  except held Interrupted work, which is never silently evicted.
+  except held Paused/Interrupted work, which is never silently evicted.
   Unfinished records are never evicted. At 64 unfinished/held jobs, new Adds get Busy
   with queue-full feedback. Cancelling/removing a queued item frees capacity; its
   cancelled history record remains until ordinary terminal eviction.
-- Cancel targets queued or running jobs. RemoveQueued is queued-only, rejecting
+- Cancel targets queued or running jobs. RemoveQueued accepts queued or held work, rejecting
   a promotion race; it never unexpectedly cancels a running job. Both are
   instance-qualified and never automatically retried. Shutdown cancels all
   queued work, retains private retry input, and drains the running worker.
   Reopening the GUI reconnects to these records, including after restart.
 - A service restart creates a new instance but restores records and ID allocation.
-  Every unfinished record is held as Interrupted, without HEAD/GET/output work.
+  Every unfinished record is held as Interrupted, except durable pause intent
+  recovers as Paused. Existing Paused records stay held, without HEAD/GET/output work.
   Explicit Retry revalidates current policy and creates a new ID at the FIFO
   tail, including at capacity; duplicate retry while active is rejected. Other
-  held work remains idle. RemoveQueued/Cancel can dismiss held Interrupted work
+  held work remains idle. RemoveQueued/Cancel can dismiss held Paused/Interrupted work
   into cancelled history. Current instance-qualified handles remain mandatory.
   Existing engine partial/resume files are authoritative, never stored offsets.
   Resume/retry is not forced overwrite or a promise of byte-range continuation.
@@ -108,7 +109,8 @@ operation can delay it; there is no unsafe forced-abort button.
   SFTP and userinfo credentials are still refused. Firefox explicit link handoff
   is available through the separate `rdm-native-host` preview; see
   [Firefox setup](../../extensions/firefox/README.md).
-- No parallel managed downloads, per-file pause or automatic network replay.
+- No parallel managed downloads or automatic network replay. Pause/Resume applies
+  only to this shared direct-file service, not provider/SFTP or legacy queue work.
   The existing persisted CLI queue remains separate; no automatic import or
   migration of provider/listing/sync workflows is performed.
 - The service loads existing config once at startup, retaining parse errors and
@@ -128,7 +130,7 @@ DB and lock (0600); symlinks, hardlinked/shared files and unsafe paths are refus
 A second lifetime lock in the durable directory prevents services using different
 runtime directories from opening the same state. No legacy queue import occurs.
 
-SQLite is bundled into the service only, with schema version 1, DELETE journal
+SQLite is bundled into the service only, with schema version 2 (validated schema-1 images migrate in place), DELETE journal
 and synchronous FULL transactions. A bounded complete image is committed before
 ACK, promotion/engine creation, cancellation publication or terminal publication.
 SQLite/fsync work uses Tokio's blocking pool, not reactor workers. Progress is
@@ -149,7 +151,7 @@ terminal eviction drops old inputs. Do not share state files/backups. Permission
 are an OS-user boundary, not encryption or protection from same-user processes.
 Retryable history remains bounded, not an indefinite archive of every attempt.
 Stop the previous service using its matching binary BEFORE upgrading; rebuild
-all installed Rust clients/service/native host together (IPC v4), and reload
+all installed Rust clients/service/native host together (IPC v5), and reload
 Firefox extension 0.3.0. The extension's external protocol stays v1.
 
 ## Validation
@@ -186,3 +188,37 @@ them. On range failure/cancellation, sibling ranges and progress/autosave helper
 are cancelled/drained before returning, and a final validated checkpoint is saved.
 This prevents an old autosaver racing a retry. It prevents new bad checkpoints;
 it does not repair partial files already corrupted by older versions.
+
+## Durable Pause / Resume
+
+Pause persists intent before signalling the existing engine token; it does not
+freeze tasks in memory. Running work remains Pausing/running until the worker and
+all checkpoint helpers are joined, then becomes Paused, and only then the next
+FIFO entry starts. Queued work becomes Paused without starting an engine. No idle
+hold heartbeat/timer is introduced. Held pauses are protected at the 64-job bound.
+The pause intent survives a crash during drain. Successful completion or a genuine
+failure racing pause remains its real result; only a drained Cancelled engine
+outcome becomes Paused. Explicit Cancel overrides Pausing; Shutdown preserves it.
+
+Resume uses Retry's existing distinct-attempt transaction and current policy
+revalidation. The original paused record loses input/retryability and links to the
+fresh tail attempt; old waiters/cancel handles stay safe. Range-capable servers
+reuse valid engine partials, no-range servers safely restart, final output is
+protected. A CLI waiter exits nonzero on Paused, not success, and never follows a
+fresh attempt automatically. Paused input has the same plaintext-URL privacy as
+other retryable records. Schema 2 gates older readers; downgrade is unsupported.
+
+`tests/service_pause_smoke.py` exercises actual CLI pause/resume and local HTTP,
+FIFO advancement, no queued/held network work, drained metadata tasks, crash
+recovery, exact bytes with Range and without ranges, and existing-output safety.
+
+Pause cancellation uses a typed engine marker, not merely a set cancellation
+token: failed flush/sync or final metadata writes remain Failed. Sibling range
+errors encountered while draining also take priority over cancellation. Streaming
+partials flush and sync before confirming intentional cancellation.
+
+Non-overwrite `Reuse` now protects an existing final path even beside a retained
+partial/manifest. The same protection is carried through ranged, streaming and
+empty-file publication so a file arriving during HEAD/inspection cannot become
+implicit overwrite consent. Explicit legacy interactive/overwrite policies are
+otherwise unchanged; valid partials without a final file still resume normally.

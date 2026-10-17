@@ -197,7 +197,7 @@ pub async fn download(input: Input, sink: GuiSink, cancel: CancellationToken) ->
         Ok(Outcome::Completed { path, bytes }) => Finished::Completed { path, bytes },
         Ok(Outcome::AlreadyPresent { path }) => Finished::AlreadyPresent { path },
         Ok(Outcome::Cancelled) => Finished::Cancelled,
-        Err(_) if cancel.is_cancelled() => Finished::Cancelled,
+        Err(error) if error.is::<engine::TransferCancelled>() => Finished::Cancelled,
         Err(error) => Finished::Failed(safe_error(&error)),
     }
 }

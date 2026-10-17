@@ -6,7 +6,7 @@ pub mod wire;
 
 use serde::{Deserialize, Serialize};
 
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 pub const MAX_FRAME: usize = 1024 * 1024;
 pub const MAX_JOBS: usize = 64;
 pub type JobId = u64;
@@ -47,6 +47,11 @@ pub enum Request {
     AddCli(AddCli),
     List,
     Subscribe,
+    /// Persist a hold, then drain the active worker before reporting Paused.
+    Pause {
+        instance: String,
+        id: JobId,
+    },
     Cancel {
         instance: String,
         id: JobId,
@@ -119,6 +124,8 @@ pub enum Finished {
     Cancelled,
     /// Recovered unfinished work; requires explicit user action.
     Interrupted,
+    /// Deliberately held, with no worker. Explicit resume creates a new attempt.
+    Paused,
     Failed(String),
 }
 
@@ -138,6 +145,9 @@ pub struct Job {
     /// A deliberate retry created a distinct attempt; old handles stay safe.
     #[serde(default)]
     pub retried_as: Option<JobId>,
+    /// Durable pause intent; true only while the existing worker drains.
+    #[serde(default)]
+    pub pausing: bool,
     pub cancelling: bool,
     pub result: Option<Finished>,
 }
@@ -145,6 +155,10 @@ impl Job {
     /// Unfinished, including queued jobs (not a count of running workers).
     pub fn active(&self) -> bool {
         self.result.is_none()
+    }
+    /// Held work cannot be evicted as ordinary terminal history.
+    pub fn held(&self) -> bool {
+        self.retryable && matches!(self.result, Some(Finished::Interrupted | Finished::Paused))
     }
     pub fn running(&self) -> bool {
         self.active() && !self.queued
@@ -208,5 +222,34 @@ mod cli_tests {
             allow_private: true,
         });
         assert!(!format!("{request:?}").contains("secret"));
+    }
+}
+
+#[cfg(test)]
+mod pause_tests {
+    use super::*;
+    #[test]
+    fn paused_work_is_held_not_running_or_evictable() {
+        let mut job = Job {
+            id: 1,
+            label: "file".into(),
+            destination: "/tmp/file".into(),
+            progress: Progress::default(),
+            queued: false,
+            retryable: true,
+            retried_as: None,
+            pausing: false,
+            cancelling: false,
+            result: Some(Finished::Paused),
+        };
+        assert!(job.held());
+        assert!(!job.active());
+        assert!(!job.running());
+        job.retryable = false;
+        job.retried_as = Some(2);
+        assert!(!job.held(), "retired pause attempt may be evicted");
+        job.result = None;
+        job.pausing = true;
+        assert!(job.running(), "worker remains counted until joined");
     }
 }

@@ -22,6 +22,8 @@ pub struct ParallelDownloadCtx<'a> {
     pub url: &'a str,
     pub fetch_url: &'a str,
     pub output_path: &'a str,
+    /// Never replace a final path, even if it appeared during inspection.
+    pub protect_existing: bool,
     pub file_size: u64,
     pub chunks: &'a [Chunk],
     pub retry_config: &'a RetryConfig,
@@ -49,7 +51,8 @@ where
     // Whether to overwrite was settled further up, at the moment that question
     // was asked; a file that appears while the download runs was never part of
     // that decision, and the rename below will not take it.
-    let destination_existed = fs::symlink_metadata(ctx.output_path).await.is_ok();
+    let destination_existed =
+        !ctx.protect_existing && fs::symlink_metadata(ctx.output_path).await.is_ok();
 
     match parallel_inner(ctx, &temp_path, &meta_path, progress_callback).await {
         Ok(total) => {
@@ -175,7 +178,7 @@ where
             tokio::select! {
                 biased;
                 _ = ctx.cancel.cancelled() => {
-                    failure = Some(anyhow::anyhow!("Cancelled while waiting out the server's back-off"));
+                    failure = Some(anyhow::Error::new(crate::engine::TransferCancelled).context("Cancelled while waiting out the server's back-off"));
                     break;
                 }
                 _ = tokio::time::sleep(wait) => {}
@@ -243,7 +246,17 @@ where
     if failure.is_some() {
         worker_cancel.cancel();
     }
-    while join_set.join_next().await.is_some() {}
+    while let Some(result) = join_set.join_next().await {
+        // A sibling's flush/checkpoint failure must win over an intentional
+        // cancellation: reporting Paused would falsely promise a clean drain.
+        match result {
+            Ok(Err(error)) if !error.is::<crate::engine::TransferCancelled>() => {
+                failure = Some(error)
+            }
+            Err(error) => failure = Some(anyhow::anyhow!("Worker panic: {}", error)),
+            _ => {}
+        }
+    }
     done_flag.store(true, Ordering::Relaxed);
     if let Some(h) = monitor_handle {
         let _ = h.await;
@@ -420,12 +433,14 @@ async fn download_chunk_with_retry(
 
         if cancel.is_cancelled() {
             let written = chunk_progress.load(Ordering::SeqCst);
-            anyhow::bail!(
-                "Chunk #{} cancelled before attempt {} ({} of {} bytes on disk)",
-                chunk.id,
-                attempt + 1,
-                written,
-                full_chunk_size
+            return Err(
+                anyhow::Error::new(crate::engine::TransferCancelled).context(format!(
+                    "Chunk #{} cancelled before attempt {} ({} of {} bytes on disk)",
+                    chunk.id,
+                    attempt + 1,
+                    written,
+                    full_chunk_size
+                )),
             );
         }
 
@@ -458,11 +473,11 @@ async fn download_chunk_with_retry(
 
             Ok(DownloadStatus::Cancelled { .. }) => {
                 let written = chunk_progress.load(Ordering::SeqCst);
-                anyhow::bail!(
-                    "Chunk #{} cancelled after {} of {} bytes",
-                    chunk.id,
-                    written,
-                    full_chunk_size
+                return Err(
+                    anyhow::Error::new(crate::engine::TransferCancelled).context(format!(
+                        "Chunk #{} cancelled after {} of {} bytes",
+                        chunk.id, written, full_chunk_size
+                    )),
                 );
             }
 
@@ -518,7 +533,7 @@ async fn download_chunk_with_retry(
 
                 tokio::select! {
                     biased;
-                    _ = cancel.cancelled() => { anyhow::bail!("Chunk #{} cancelled during retry backoff", chunk.id); }
+                    _ = cancel.cancelled() => { return Err(anyhow::Error::new(crate::engine::TransferCancelled).context(format!("Chunk #{} cancelled during retry backoff", chunk.id))); }
                     _ = tokio::time::sleep(delay) => {}
                 }
             }

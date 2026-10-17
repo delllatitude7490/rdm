@@ -32,9 +32,11 @@ impl Tracked {
             Some(Finished::Completed { .. }) => "Completed",
             Some(Finished::AlreadyPresent { .. }) => "Already exists — file left unchanged",
             Some(Finished::Cancelled) => "Cancelled",
+            Some(Finished::Paused) => "Paused — resume when you’re ready",
             Some(Finished::Interrupted) => "Interrupted — waiting for your approval",
             Some(Finished::Failed(_)) => "Failed",
             None if self.record.queued => "Queued — waiting for its turn",
+            None if self.record.pausing => "Pausing safely…",
             None if self.record.cancelling => "Cancelling safely…",
             None => match self.record.progress.phase {
                 Phase::Waiting => "Preparing",
@@ -52,6 +54,7 @@ pub enum Message {
     FilenameChanged(String),
     Start,
     Cancel(u64),
+    Pause(u64),
     Retry(u64),
     Shutdown,
     Reconnect,
@@ -93,7 +96,7 @@ impl App {
             if old.instance != snapshot.instance {
                 self.jobs.clear();
                 self.pending = false;
-                self.error = Some("The service restarted. Unfinished downloads are restored as interrupted; choose Resume / retry to continue.".into());
+                self.error = Some("The service restarted. Unfinished downloads are held; paused jobs stay paused. Choose Resume / retry to continue.".into());
             }
         }
         if self.directory.is_empty() {
@@ -220,10 +223,10 @@ impl App {
             }
             Message::Cancel(id) if self.connected && !self.stopping() => {
                 if let Some(snapshot) = &self.snapshot {
-                    let queued = self.jobs.iter().any(|j| {
-                        j.record.id == id
-                            && (j.record.queued || j.record.result == Some(Finished::Interrupted))
-                    });
+                    let queued = self
+                        .jobs
+                        .iter()
+                        .any(|j| j.record.id == id && (j.record.queued || j.record.held()));
                     return self.send(if queued {
                         Request::RemoveQueued {
                             instance: snapshot.instance.clone(),
@@ -234,6 +237,14 @@ impl App {
                             instance: snapshot.instance.clone(),
                             id,
                         }
+                    });
+                }
+            }
+            Message::Pause(id) if self.connected && !self.stopping() => {
+                if let Some(snapshot) = &self.snapshot {
+                    return self.send(Request::Pause {
+                        instance: snapshot.instance.clone(),
+                        id,
                     });
                 }
             }
@@ -366,11 +377,20 @@ impl App {
             .align_y(iced::Alignment::Center),
         );
         if !self.jobs.is_empty() {
-            for section in ["Downloading", "Queued", "Needs attention", "Finished"] {
+            for section in [
+                "Downloading",
+                "Queued",
+                "Paused",
+                "Needs attention",
+                "Finished",
+            ] {
                 let selected = |job: &&Tracked| match section {
                     "Downloading" => job.record.running(),
                     "Queued" => job.record.queued,
-                    "Needs attention" => job.record.retryable,
+                    "Paused" => job.record.result == Some(Finished::Paused) && job.record.retryable,
+                    "Needs attention" => {
+                        job.record.retryable && job.record.result != Some(Finished::Paused)
+                    }
                     _ => !job.record.active() && !job.record.retryable,
                 };
                 if self.jobs.iter().any(|j| selected(&j)) {
@@ -441,8 +461,15 @@ impl App {
             && !self.pending
             && job.record.active()
             && !job.record.cancelling
+            && !job.record.pausing
             && !self.stopping()
         {
+            heading = heading.push(
+                button("Pause")
+                    .on_press(Message::Pause(job.record.id))
+                    .height(44)
+                    .padding([8, 16]),
+            );
             heading = heading.push(
                 button(if job.record.queued {
                     "Remove"
@@ -457,12 +484,16 @@ impl App {
         }
         if self.connected && !self.pending && !self.stopping() && job.record.retryable {
             heading = heading.push(
-                button("Resume / retry")
-                    .on_press(Message::Retry(job.record.id))
-                    .height(44)
-                    .padding([8, 16]),
+                button(if job.record.result == Some(Finished::Paused) {
+                    "Resume"
+                } else {
+                    "Resume / retry"
+                })
+                .on_press(Message::Retry(job.record.id))
+                .height(44)
+                .padding([8, 16]),
             );
-            if job.record.result == Some(Finished::Interrupted) {
+            if job.record.held() {
                 heading = heading.push(
                     button("Remove")
                         .on_press(Message::Cancel(job.record.id))
@@ -489,7 +520,7 @@ impl App {
                 .color(MUTED),
             );
             card = card.push(text(&job.record.destination).size(12).color(MUTED));
-        } else if job.record.result == Some(Finished::Interrupted) {
+        } else if job.record.held() {
             card = card.push(
                 text(format!(
                     "Last saved progress: {} (may lag the partial file)",
@@ -545,7 +576,7 @@ impl App {
             Some(Finished::Completed { path, .. } | Finished::AlreadyPresent { path }) => {
                 card = card.push(text(path).size(12).color(MUTED));
             }
-            Some(Finished::Cancelled | Finished::Interrupted)
+            Some(Finished::Cancelled | Finished::Interrupted | Finished::Paused)
                 if job.record.retried_as.is_none() =>
             {
                 card = card.push(text("No download will restart automatically. Resume / retry requeues this destination and reuses valid partial state where supported.").size(12).color(MUTED));
@@ -587,6 +618,7 @@ mod tests {
                 queued: false,
                 retryable: false,
                 retried_as: None,
+                pausing: false,
                 cancelling: false,
                 result: None,
             }],
@@ -725,6 +757,24 @@ mod tests {
         app.apply(snapshot);
         assert_eq!(app.jobs[0].status(), "Requeued — see newer attempt");
         assert!(!app.active());
+        assert_eq!(app.jobs[0].speed, None);
+    }
+    #[test]
+    fn pausing_counts_worker_until_drained_and_paused_has_no_live_speed() {
+        let mut snapshot = state("pause", 1);
+        snapshot.jobs[0].pausing = true;
+        let mut app = App::boot();
+        app.apply(snapshot.clone());
+        assert_eq!(app.jobs[0].status(), "Pausing safely…");
+        assert!(app.active());
+        snapshot.revision += 1;
+        snapshot.jobs[0].pausing = false;
+        snapshot.jobs[0].retryable = true;
+        snapshot.jobs[0].result = Some(Finished::Paused);
+        app.apply(snapshot);
+        assert_eq!(app.jobs[0].status(), "Paused — resume when you’re ready");
+        assert!(!app.active());
+        assert!(app.jobs[0].record.held());
         assert_eq!(app.jobs[0].speed, None);
     }
 }

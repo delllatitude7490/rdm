@@ -56,7 +56,7 @@ with tempfile.TemporaryDirectory(prefix='rdm-shared-queue-') as name:
     def ipc(command):
         with socket.socket(socket.AF_UNIX) as s:
             s.settimeout(8); s.connect(str(runtime/'rdm/service.sock'))
-            data = json.dumps({'version': 4, 'body': command}).encode()
+            data = json.dumps({'version': 5, 'body': command}).encode()
             s.sendall(struct.pack('>I', len(data))+data)
             size = struct.unpack('>I', receive(s, 4))[0]
             response = json.loads(receive(s, size))['body']

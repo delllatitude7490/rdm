@@ -1109,3 +1109,275 @@ async fn retry_revalidates_current_service_network_policy_without_replaying_env(
     assert!(held.jobs[0].retried_as.is_none());
     service.shutdown().await;
 }
+#[tokio::test]
+async fn failed_pause_commit_drains_without_publishing_paused_or_promoting() {
+    let blocked = http(false).await;
+    let finite = http(true).await;
+    let mut service = Service::spawn(tempfile::tempdir().unwrap());
+    let initial = service.ready().await;
+    client::request_at(&service.paths, service.add(&blocked.base, "active.bin"))
+        .await
+        .unwrap();
+    service.until(|s| s.jobs[0].progress.downloaded > 0).await;
+    client::request_at(&service.paths, service.add(&finite.base, "untouched.bin"))
+        .await
+        .unwrap();
+    let journal = service
+        .root
+        .path()
+        .join("state/rdm/service/jobs.sqlite3-journal");
+    fs::create_dir(&journal).unwrap();
+    let error = client::request_at(
+        &service.paths,
+        Request::Pause {
+            instance: initial.instance,
+            id: 1,
+        },
+    )
+    .await
+    .unwrap_err();
+    fs::remove_dir(&journal).unwrap();
+    assert!(matches!(
+        error,
+        client::Error::Rejected(ErrorCode::Internal, _)
+    ));
+    timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(status) = service.child.try_wait().unwrap() {
+                assert!(!status.success());
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        !service
+            .root
+            .path()
+            .join("downloads/untouched.bin.part")
+            .exists()
+    );
+    assert!(!service.root.path().join("downloads/untouched.bin").exists());
+    service.child = Service::command(&service.root).spawn().unwrap();
+    let recovered = service.ready().await;
+    assert_eq!(recovered.jobs.len(), 2);
+    assert!(
+        recovered
+            .jobs
+            .iter()
+            .all(|j| j.result == Some(Finished::Interrupted))
+    );
+    service.shutdown().await;
+}
+
+#[tokio::test]
+async fn pause_drains_before_next_worker_and_held_jobs_survive_restart() {
+    let blocked = http(false).await;
+    let finite = http(true).await;
+    let mut service = Service::spawn(tempfile::tempdir().unwrap());
+    let original = service.ready().await;
+    client::request_at(&service.paths, service.add(&blocked.base, "pause.bin"))
+        .await
+        .unwrap();
+    service.until(|s| s.jobs[0].progress.downloaded > 0).await;
+    client::request_at(&service.paths, service.add(&finite.base, "next.bin"))
+        .await
+        .unwrap();
+    client::request_at(&service.paths, service.add(&finite.base, "held.bin"))
+        .await
+        .unwrap();
+    let held = client::request_at(
+        &service.paths,
+        Request::Pause {
+            instance: original.instance.clone(),
+            id: 3,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(held.jobs[2].result, Some(Finished::Paused));
+    assert!(held.jobs[2].held());
+    assert!(!service.root.path().join("downloads/held.bin.part").exists());
+    let requested = client::request_at(
+        &service.paths,
+        Request::Pause {
+            instance: original.instance.clone(),
+            id: 1,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(requested.jobs[0].pausing || requested.jobs[0].result == Some(Finished::Paused));
+    let next = service.until(|s| s.jobs[1].result.is_some()).await;
+    assert_eq!(next.jobs[0].result, Some(Finished::Paused));
+    assert!(!next.jobs[0].pausing);
+    assert!(next.jobs[0].held());
+    assert!(matches!(
+        next.jobs[1].result,
+        Some(Finished::Completed { .. })
+    ));
+    let part = service.root.path().join("downloads/pause.bin.part");
+    let size = fs::metadata(&part).unwrap().len();
+    sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        fs::metadata(&part).unwrap().len(),
+        size,
+        "worker fully drained"
+    );
+    // Idempotent hold; don't create a new attempt from repeated Pause.
+    let repeated = client::request_at(
+        &service.paths,
+        Request::Pause {
+            instance: original.instance.clone(),
+            id: 1,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(repeated.jobs.len(), 3);
+    let denied = client::request_at(
+        &service.paths,
+        Request::Pause {
+            instance: original.instance.clone(),
+            id: 2,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        denied,
+        client::Error::Rejected(ErrorCode::Invalid, _)
+    ));
+    service.shutdown().await;
+    service.child = Service::command(&service.root).spawn().unwrap();
+    let recovered = service.ready().await;
+    assert!(recovered.jobs[0].held() && recovered.jobs[2].held());
+    assert_eq!(recovered.jobs[0].result, Some(Finished::Paused));
+    sleep(Duration::from_millis(200)).await;
+    assert!(!service.ready().await.jobs.iter().any(|j| j.active()));
+    assert!(matches!(
+        client::request_at(
+            &service.paths,
+            Request::Pause {
+                instance: original.instance,
+                id: 1
+            }
+        )
+        .await
+        .unwrap_err(),
+        client::Error::Rejected(ErrorCode::StaleInstance, _)
+    ));
+    let resumed = client::request_at(
+        &service.paths,
+        Request::Retry {
+            instance: recovered.instance.clone(),
+            id: 3,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(resumed.jobs.last().unwrap().id, 4);
+    assert_eq!(resumed.jobs[2].retried_as, Some(4));
+    service
+        .until(|s| s.jobs.last().unwrap().result.is_some())
+        .await;
+    assert_eq!(
+        fs::read(service.root.path().join("downloads/held.bin")).unwrap(),
+        vec![42; 30720]
+    );
+    let removed = client::request_at(
+        &service.paths,
+        Request::RemoveQueued {
+            instance: recovered.instance,
+            id: 1,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(removed.jobs[0].result, Some(Finished::Cancelled));
+    service.shutdown().await;
+}
+
+#[tokio::test]
+async fn paused_capacity_is_protected_and_resume_can_retire_its_own_record() {
+    let blocked = http(false).await;
+    let mut service = Service::spawn(tempfile::tempdir().unwrap());
+    let s = service.ready().await;
+    for n in 0..64 {
+        let added = client::request_at(
+            &service.paths,
+            service.add(&blocked.base, &format!("pause-{n}.bin")),
+        )
+        .await
+        .unwrap();
+        let id = added.jobs.last().unwrap().id;
+        client::request_at(
+            &service.paths,
+            Request::Pause {
+                instance: s.instance.clone(),
+                id,
+            },
+        )
+        .await
+        .unwrap();
+        service
+            .until(|s| s.jobs.last().unwrap().result == Some(Finished::Paused))
+            .await;
+    }
+    assert!(matches!(
+        client::request_at(&service.paths, service.add(&blocked.base, "overflow.bin"))
+            .await
+            .unwrap_err(),
+        client::Error::Rejected(ErrorCode::Busy, _)
+    ));
+    let resumed = client::request_at(
+        &service.paths,
+        Request::Retry {
+            instance: s.instance,
+            id: 32,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(resumed.jobs.len(), 64);
+    assert_eq!(resumed.jobs.last().unwrap().id, 65);
+    assert_eq!(resumed.jobs.iter().filter(|j| j.held()).count(), 63);
+    assert!(!resumed.jobs.iter().any(|j| j.id == 32));
+    service.shutdown().await;
+}
+
+#[tokio::test]
+async fn recovery_honours_committed_pause_intent_without_replaying_it() {
+    let blocked = http(false).await;
+    let mut service = Service::spawn(tempfile::tempdir().unwrap());
+    service.ready().await;
+    client::request_at(&service.paths, service.add(&blocked.base, "intent.bin"))
+        .await
+        .unwrap();
+    service.child.kill().unwrap();
+    service.child.wait().unwrap();
+    // Deterministically simulate a crash between the committed intent and
+    // worker drain. Editing is only for this isolated, stopped test service.
+    let db = rusqlite::Connection::open(service.root.path().join("state/rdm/service/jobs.sqlite3"))
+        .unwrap();
+    let payload: String = db
+        .query_row("SELECT payload FROM state WHERE id=1", [], |r| r.get(0))
+        .unwrap();
+    let mut image: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    image["records"][0]["job"]["pausing"] = true.into();
+    db.execute(
+        "UPDATE state SET payload=?1 WHERE id=1",
+        [image.to_string()],
+    )
+    .unwrap();
+    drop(db);
+    service.child = Service::command(&service.root).spawn().unwrap();
+    let s = service.ready().await;
+    assert_eq!(s.jobs[0].result, Some(Finished::Paused));
+    assert!(!s.jobs[0].pausing);
+    assert!(s.jobs[0].held());
+    assert!(!s.jobs[0].active());
+    service.shutdown().await;
+}
