@@ -6,7 +6,7 @@ pub mod wire;
 
 use serde::{Deserialize, Serialize};
 
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 pub const MAX_FRAME: usize = 1024 * 1024;
 pub const MAX_JOBS: usize = 64;
 pub type JobId = u64;
@@ -47,9 +47,22 @@ pub enum Request {
     AddCli(AddCli),
     List,
     Subscribe,
-    Cancel { instance: String, id: JobId },
-    RemoveQueued { instance: String, id: JobId },
-    Shutdown { instance: String },
+    Cancel {
+        instance: String,
+        id: JobId,
+    },
+    RemoveQueued {
+        instance: String,
+        id: JobId,
+    },
+    /// Explicitly requeue a retryable record; never automatic on recovery.
+    Retry {
+        instance: String,
+        id: JobId,
+    },
+    Shutdown {
+        instance: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,9 +109,16 @@ impl Default for Progress {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Finished {
-    Completed { path: String, bytes: u64 },
-    AlreadyPresent { path: String },
+    Completed {
+        path: String,
+        bytes: u64,
+    },
+    AlreadyPresent {
+        path: String,
+    },
     Cancelled,
+    /// Recovered unfinished work; requires explicit user action.
+    Interrupted,
     Failed(String),
 }
 
@@ -112,6 +132,12 @@ pub struct Job {
     // Allows decoding an old snapshot only to report its version mismatch.
     #[serde(default)]
     pub queued: bool,
+    /// Private retry input exists; snapshots never contain the source URL.
+    #[serde(default)]
+    pub retryable: bool,
+    /// A deliberate retry created a distinct attempt; old handles stay safe.
+    #[serde(default)]
+    pub retried_as: Option<JobId>,
     pub cancelling: bool,
     pub result: Option<Finished>,
 }

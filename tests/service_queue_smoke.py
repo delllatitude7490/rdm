@@ -46,7 +46,7 @@ with tempfile.TemporaryDirectory(prefix='rdm-shared-queue-') as name:
     config = root / 'config/rdm'; config.mkdir(parents=True)
     downloads = root / 'downloads'
     (config / 'config.toml').write_text(f'connections=1\ndownload_dir="{downloads}"\nmax_retries=0\nqueue_parallel=1\n')
-    env = dict(os.environ, HOME=str(root), XDG_CONFIG_HOME=str(root / 'config'), XDG_RUNTIME_DIR=str(runtime), RDM_ALLOW_PRIVATE='1')
+    env = dict(os.environ, HOME=str(root), XDG_STATE_HOME=str(root / "state"), XDG_CONFIG_HOME=str(root / 'config'), XDG_RUNTIME_DIR=str(runtime), RDM_ALLOW_PRIVATE='1')
     env.pop('RDM_ALLOW_PROXY', None)
     children = []
     def cli(*args, ok=True):
@@ -56,7 +56,7 @@ with tempfile.TemporaryDirectory(prefix='rdm-shared-queue-') as name:
     def ipc(command):
         with socket.socket(socket.AF_UNIX) as s:
             s.settimeout(8); s.connect(str(runtime/'rdm/service.sock'))
-            data = json.dumps({'version': 3, 'body': command}).encode()
+            data = json.dumps({'version': 4, 'body': command}).encode()
             s.sendall(struct.pack('>I', len(data))+data)
             size = struct.unpack('>I', receive(s, 4))[0]
             response = json.loads(receive(s, size))['body']

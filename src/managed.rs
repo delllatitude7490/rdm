@@ -67,14 +67,19 @@ fn find<'a>(snapshot: &'a Snapshot, handle: &Handle) -> Result<&'a Job> {
         .context("Job is no longer in service memory; its result is unknown.")
 }
 fn print_job(instance: &str, job: &Job) {
-    let state = match &job.result {
-        None if job.queued => "queued",
-        None if job.cancelling => "cancelling",
-        None => "active",
-        Some(Finished::Completed { .. }) => "completed",
-        Some(Finished::AlreadyPresent { .. }) => "already-present",
-        Some(Finished::Cancelled) => "cancelled",
-        Some(Finished::Failed(_)) => "failed",
+    let state = if job.retried_as.is_some() {
+        "requeued"
+    } else {
+        match &job.result {
+            None if job.queued => "queued",
+            None if job.cancelling => "cancelling",
+            None => "active",
+            Some(Finished::Completed { .. }) => "completed",
+            Some(Finished::AlreadyPresent { .. }) => "already-present",
+            Some(Finished::Cancelled) => "cancelled",
+            Some(Finished::Interrupted) => "interrupted (resume/retry required)",
+            Some(Finished::Failed(_)) => "failed",
+        }
     };
     println!(
         "{}",
@@ -101,9 +106,16 @@ pub fn jobs(command: &JobsCommand) -> Result<()> {
                 let j = find(&s, handle)?;
                 if *json { println!("{}", serde_json::to_string(j)?); } else { print_job(&s.instance, j); }
             }
+            JobsCommand::Retry { handle } => {
+                let s = client::request(Request::Retry { instance: handle.instance.clone(), id: handle.id }).await.map_err(safe_error)?;
+                let j = s.jobs.last().context("Retry acknowledgement missing a job. Inspect before retrying.")?;
+                let new_handle = Handle { instance: s.instance.clone(), id: j.id };
+                println!("{new_handle}");
+                eprintln!("Requeued by explicit request (not completed). Inspect with `rdm jobs inspect {new_handle}`.");
+            }
             JobsCommand::Remove { handle } => {
                 client::request(Request::RemoveQueued { instance: handle.instance.clone(), id: handle.id }).await.map_err(safe_error)?;
-                println!("Removed queued job {handle}; retained as cancelled history.");
+                println!("Removed waiting job {handle}; retained as cancelled history.");
             }
             JobsCommand::Cancel { handle } => {
                 let s = client::request(Request::Cancel { instance: handle.instance.clone(), id: handle.id }).await.map_err(safe_error)?;
@@ -196,6 +208,7 @@ pub fn download(
             Finished::AlreadyPresent { .. } => bail!(
                 "Destination already exists and was left unchanged. Choose a different -o path."
             ),
+            Finished::Interrupted => bail!("Download interrupted ({handle}); use the current handle from `rdm jobs list` to resume/retry explicitly."),
             Finished::Cancelled => bail!(
                 "Download cancelled ({handle}). Valid partial state is retained where supported."
             ),

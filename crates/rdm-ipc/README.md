@@ -6,8 +6,8 @@ client for RDM. There is no dependency on Iced or the download engine.
 See [service architecture and limitations](../rdm-service/README.md).
 
 Wire format: a big-endian u32 byte length (1..=1 MiB), followed by a JSON
-`Packet { version, body }` (internal version 3; matching Rust binaries required). Exactly one request is sent per connection. A List,
-Add, AddCli, Cancel, RemoveQueued or Shutdown receives one response; Subscribe receives an initial
+`Packet { version, body }` (internal version 4; matching Rust binaries required). Exactly one request is sent per connection. A List,
+Add, AddCli, Cancel, RemoveQueued, Retry or Shutdown receives one response; Subscribe receives an initial
 snapshot followed by snapshots until disconnect. JSON parse errors never echo
 untrusted payload text. Version mismatch is an explicit response.
 
@@ -19,12 +19,24 @@ admission and engine path.
 
 `request_at` sends a mutation once. Failures after connecting may be ambiguous,
 so callers must not automatically retry them. `ensure_running` retries only
-read-only startup probes. Cancel and Shutdown must use the instance ID from the
+read-only startup probes. Cancel, RemoveQueued, Retry and Shutdown must use the instance ID from the
 current snapshot, not a saved job ID from an earlier service process.
 
 `Job.queued` explicitly distinguishes waiting from running; `active()` means
 unfinished (either queued or running), `running()` excludes queued work. Queued
 inputs/URLs are private to the service and never appear in snapshots. Request
-acknowledgements include the new job as the last record atomically. Queued-only
+acknowledgements include the new job as the last record atomically. Waiting-job
 removal retains a cancelled terminal record for subscribed waiters. The actor
 bounds the total record set and never evicts unfinished work.
+
+`Finished::Interrupted` represents held recovered work: it is neither queued nor
+running. `Job.retryable` advertises private retry input, never exposes it.
+Retry requires a current instance handle, rejects running/successful jobs and
+creates a new ID at the tail. The response has this job last. RemoveQueued
+also accepts held Interrupted jobs without starting an engine. Mutations are
+durable before ACK; lost replies still require inspection, not blind retries.
+
+Retried source records retain their original result and `retried_as` link, but
+lose private input and retryability. The fresh attempt is appended with a new ID
+in the same transaction; old handles/waiters cannot cancel or claim its result.
+At capacity the retired source may be evicted, never other held work.

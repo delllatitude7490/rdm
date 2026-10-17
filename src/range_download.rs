@@ -138,14 +138,13 @@ pub async fn download_range(
 
     let mut stream = response.bytes_stream();
     let mut bytes_written: u64 = 0;
-    let mut bytes_since_flush: u64 = 0;
+    let mut last_checkpoint = std::time::Instant::now();
 
     loop {
         let chunk = tokio::select! {
             c = stream.next() => c,
             _ = cancel.cancelled() => {
-                file.flush().await.ok();
-                chunk_progress.store(resume_from + bytes_written, Ordering::SeqCst);
+                checkpoint(&mut file, &chunk_progress, resume_from + bytes_written).await?;
                 return Ok(DownloadStatus::Cancelled {
                     bytes_on_disk: resume_from + bytes_written,
                 });
@@ -157,8 +156,7 @@ pub async fn download_range(
                 let data_len: u64 = data.len() as u64;
 
                 if bytes_written + data_len > expected_len {
-                    file.flush().await.ok();
-                    chunk_progress.store(resume_from + bytes_written, Ordering::SeqCst);
+                    checkpoint(&mut file, &chunk_progress, resume_from + bytes_written).await?;
                     drop(stream);
                     anyhow::bail!(
                         "Server sent excess data for range {}: expected {} bytes, got at least {}",
@@ -177,23 +175,18 @@ pub async fn download_range(
                 })?;
 
                 bytes_written += data_len;
-                bytes_since_flush += data_len;
 
-                if bytes_since_flush >= 16 * 1024 * 1024 {
-                    file.flush().await.with_context(|| {
-                        format!(
-                            "Periodic flush failed at offset {}",
-                            effective_start + bytes_written
-                        )
-                    })?;
-                    bytes_since_flush = 0;
+                // The same counter feeds both UI and resume autosaves. Never
+                // publish bytes still in BufWriter (a SIGKILL would lose them).
+                // Batch at most twice per second (plus terminal cleanup), not
+                // per network packet or MiB on fast connections.
+                if last_checkpoint.elapsed() >= std::time::Duration::from_millis(500) {
+                    checkpoint(&mut file, &chunk_progress, resume_from + bytes_written).await?;
+                    last_checkpoint = std::time::Instant::now();
                 }
-
-                chunk_progress.store(resume_from + bytes_written, Ordering::SeqCst);
             }
             Some(Err(e)) => {
-                file.flush().await.ok();
-                chunk_progress.store(resume_from + bytes_written, Ordering::SeqCst);
+                checkpoint(&mut file, &chunk_progress, resume_from + bytes_written).await?;
                 // The stream error names the URL as well.
                 return Err(e.without_url()).context(format!(
                     "Stream error at byte {} of range {}",
@@ -204,9 +197,7 @@ pub async fn download_range(
         }
     }
 
-    file.flush()
-        .await
-        .context("Failed to flush file after range write")?;
+    checkpoint(&mut file, &chunk_progress, resume_from + bytes_written).await?;
 
     if bytes_written != expected_len {
         chunk_progress.store(resume_from + bytes_written, Ordering::SeqCst);
@@ -220,6 +211,22 @@ pub async fn download_range(
 
     chunk_progress.store(full_chunk_len, Ordering::SeqCst);
     Ok(DownloadStatus::Complete { bytes_written })
+}
+
+/// The counter is the checkpoint boundary, not merely received bytes. If a
+/// flush/sync fails, leave it at the last known durable offset.
+async fn checkpoint(
+    file: &mut BufWriter<tokio::fs::File>,
+    counter: &AtomicU64,
+    completed: u64,
+) -> Result<()> {
+    file.flush().await.context("Failed to flush partial data")?;
+    file.get_ref()
+        .sync_data()
+        .await
+        .context("Failed to sync partial data")?;
+    counter.store(completed, Ordering::SeqCst);
+    Ok(())
 }
 
 fn validate_content_range(
@@ -325,35 +332,65 @@ mod tests {
     }
 
     /// See the note in `inspect.rs`: a free-then-closed port rather than a
-/// hardcoded low one, and `.no_proxy()`, so that a system proxy cannot
-/// answer for the unreachable address and let the send succeed.
-fn refused_url(query: &str) -> String {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    format!("http://127.0.0.1:{port}/f?{query}")
-}
+    /// hardcoded low one, and `.no_proxy()`, so that a system proxy cannot
+    /// answer for the unreachable address and let the send succeed.
+    fn refused_url(query: &str) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        format!("http://127.0.0.1:{port}/f?{query}")
+    }
 
-/// The chunk path retries, so this error text is printed once per attempt.
-#[tokio::test]
-async fn a_failed_range_request_does_not_name_the_url_it_failed_on() {
-    let progress = Arc::new(AtomicU64::new(0));
-    let error = download_range(
-        &Client::builder().no_proxy().build().unwrap(),
-        &refused_url("key=SUPERSECRETKEY"),
-        "/nonexistent-directory-for-rdm-test/x.part",
-        0,
-        1023,
-        0,
-        progress,
-        CancellationToken::new(),
-    )
-    .await
-    .expect_err("a closed loopback port must not answer");
+    /// The chunk path retries, so this error text is printed once per attempt.
+    #[tokio::test]
+    async fn a_failed_range_request_does_not_name_the_url_it_failed_on() {
+        let progress = Arc::new(AtomicU64::new(0));
+        let error = download_range(
+            &Client::builder().no_proxy().build().unwrap(),
+            &refused_url("key=SUPERSECRETKEY"),
+            "/nonexistent-directory-for-rdm-test/x.part",
+            0,
+            1023,
+            0,
+            progress,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a closed loopback port must not answer");
 
-    let chain = format!("{error:#}");
-    assert!(!chain.contains("SUPERSECRETKEY"), "leaked: {chain}");
-    assert!(!chain.contains("127.0.0.1"), "leaked: {chain}");
-}
+        let chain = format!("{error:#}");
+        assert!(!chain.contains("SUPERSECRETKEY"), "leaked: {chain}");
+        assert!(!chain.contains("127.0.0.1"), "leaked: {chain}");
+    }
 
+    #[tokio::test]
+    async fn checkpoint_flushes_bytes_before_publishing_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("partial");
+        let file = tokio::fs::File::create(&path).await.unwrap();
+        let mut writer = BufWriter::with_capacity(1024 * 1024, file);
+        let counter = AtomicU64::new(0);
+        writer
+            .write_all(b"buffered until checkpoint")
+            .await
+            .unwrap();
+        assert!(std::fs::read(&path).unwrap().is_empty());
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+        checkpoint(&mut writer, &counter, 25).await.unwrap();
+        assert_eq!(counter.load(Ordering::SeqCst), 25);
+        assert_eq!(std::fs::read(&path).unwrap(), b"buffered until checkpoint");
+    }
+    #[tokio::test]
+    async fn failed_checkpoint_does_not_advance_saved_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("readonly");
+        std::fs::write(&path, b"existing").unwrap();
+        let file = tokio::fs::File::open(&path).await.unwrap();
+        let mut writer = BufWriter::new(file);
+        writer.write_all(b"buffered").await.unwrap();
+        let counter = AtomicU64::new(7);
+        assert!(checkpoint(&mut writer, &counter, 15).await.is_err());
+        assert_eq!(counter.load(Ordering::SeqCst), 7);
+        assert_eq!(std::fs::read(&path).unwrap(), b"existing");
+    }
 }

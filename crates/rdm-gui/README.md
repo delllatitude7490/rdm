@@ -37,7 +37,7 @@ workspace default; normal CLI-only builds do not build Iced or the service.
 - Further submissions enter the shared FIFO queue. Inputs remain editable while
   work runs; the button becomes **Add to queue**. Confirmed submission clears
   URL/filename; an unconfirmed or rejected submission does not.
-- Separate **Downloading**, **Queued** (FIFO positions) and **Finished** sections.
+- Separate **Downloading**, **Queued** (FIFO positions), **Needs attention** and **Finished** sections.
   Remove queued jobs without touching output; cancel running jobs safely.
   The next job starts only after the previous engine worker has fully cleaned up.
 - Coalesced service progress, sampled speed, known/unknown totals and outcomes.
@@ -54,11 +54,16 @@ workspace default; normal CLI-only builds do not build Iced or the service.
 - The service owns configuration, network safety and errors. A running service's
   configuration/environment does not change when another GUI is launched.
 
-Records are capped at 64 and are **not durable**. Restarting the service clears
-in-memory records; existing partial files are not automatically restarted. The
-GUI explains a detected service-instance change. Parallel downloads, durable queue/history,
-provider/SFTP routing, graphical folder picker, pause, tray and installer remain
-future milestones. Firefox explicit handoff is available separately.
+Records are capped at 64 and persist privately in the service's SQLite database.
+After restart, unfinished work appears as **Interrupted** under **Needs attention**;
+no network activity resumes automatically. **Resume / retry** explicitly creates
+a fresh attempt at the FIFO tail, using the saved destination and engine resume rules.
+Failed/cancelled jobs also offer retry; completed files remain protected.
+**Remove** releases held Interrupted work without touching partial files.
+Saved progress may lag after a crash; it is not proof of a valid resumable offset.
+See the service README for state location, permissions and plaintext-URL privacy.
+Parallel downloads, provider/SFTP routing, graphical folder picker, pause, tray
+and installer remain future milestones. Firefox explicit handoff is separate.
 
 Direct HTTP/HTTPS CLI files now share this service. Provider/SFTP routes, listings,
 sync and the persisted queue still do not: avoid concurrent writes to the same

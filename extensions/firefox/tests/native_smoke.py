@@ -53,7 +53,7 @@ with tempfile.TemporaryDirectory(prefix="rdm-firefox-test-") as name:
     config.mkdir(parents=True)
     downloads = root / "downloads"
     (config / "config.toml").write_text(f'connections = 1\ndownload_dir = "{downloads}"\nmax_retries = 0\nqueue_parallel = 1\n')
-    env = dict(os.environ, HOME=str(root), XDG_RUNTIME_DIR=str(runtime), XDG_CONFIG_HOME=str(root / "config"), RDM_ALLOW_PRIVATE="1")
+    env = dict(os.environ, HOME=str(root), XDG_RUNTIME_DIR=str(runtime), XDG_STATE_HOME=str(root / "state"), XDG_CONFIG_HOME=str(root / "config"), RDM_ALLOW_PRIVATE="1")
     env.pop("RDM_ALLOW_PROXY", None)
     socket_path = runtime / "rdm/service.sock"
     def native(command):
@@ -68,7 +68,7 @@ with tempfile.TemporaryDirectory(prefix="rdm-firefox-test-") as name:
         with socket.socket(socket.AF_UNIX) as stream:
             stream.settimeout(5)
             stream.connect(str(socket_path))
-            data = json.dumps({"version": 3, "body": command}).encode()
+            data = json.dumps({"version": 4, "body": command}).encode()
             stream.sendall(struct.pack(">I", len(data))+data)
             size = struct.unpack(">I", receive(stream, 4))[0]
             assert 0 < size <= 1024*1024

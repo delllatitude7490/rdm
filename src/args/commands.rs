@@ -145,7 +145,7 @@ pub enum ClearTarget {
 
 #[derive(Debug, Subcommand)]
 pub enum JobsCommand {
-    /// List the service's bounded in-memory job history
+    /// List the service's bounded persistent job history
     List {
         #[arg(long)]
         json: bool,
@@ -158,6 +158,9 @@ pub enum JobsCommand {
     },
     /// Request cancellation; the service drains the worker asynchronously
     Cancel { handle: crate::managed::Handle },
-    /// Remove a not-yet-started service job (retains a cancelled history record)
+    /// Remove a queued or interrupted service job (retains a cancelled history record)
     Remove { handle: crate::managed::Handle },
+    /// Requeue interrupted/cancelled/failed work; resumes valid partials where supported
+    #[command(alias = "resume")]
+    Retry { handle: crate::managed::Handle },
 }

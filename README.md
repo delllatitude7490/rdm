@@ -22,12 +22,11 @@ managed downloads running; reopening reconnects.** Stop the service explicitly
 from the GUI or with `rdm-service --shutdown` to cancel and drain work.
 
 This preview runs one direct HTTP/HTTPS managed download at a time and queues
-further submissions FIFO. Queue and history are bounded and in-memory, not
-durable. Direct HTTP/HTTPS CLI files,
+further submissions FIFO. Queue and history are bounded and persisted privately in SQLite. Direct HTTP/HTTPS CLI files,
 the GUI and Firefox handoffs share admission and job state. Provider/SFTP routes,
 HTTP listings, sync and the persisted queue remain outside the service: never
 target the same output concurrently from those legacy paths. Parallel managed
-transfers, durable queue/history and pause remain future milestones.
+transfers and pause remain future milestones.
 
 See [GUI setup](crates/rdm-gui/README.md) and
 [service architecture, runtime requirements and limitations](crates/rdm-service/README.md).
@@ -88,6 +87,8 @@ cargo build -p rdm -p rdm-service --release --locked
 ./target/release/rdm jobs inspect INSTANCE:ID --json
 ./target/release/rdm jobs cancel INSTANCE:ID
 ./target/release/rdm jobs remove INSTANCE:ID
+./target/release/rdm jobs retry INSTANCE:ID
+# `jobs resume` is an alias for retry (not a guarantee of byte-range resume).
 ```
 
 - The default waits through queue time for the service's terminal result; success
@@ -118,18 +119,27 @@ cargo build -p rdm -p rdm-service --release --locked
   mutation retry. Inspect before resending an uncertain command.
 - One running managed job across all clients; further validated submissions join
   the service-owned FIFO queue. At most 64 records total (running + queued +
-  finished); terminal history is evicted first. If all 64 are unfinished, new
+  finished); terminal history (excluding held Interrupted jobs) is evicted first. If all 64 are unfinished/held, new
   submissions fail explicitly with queue-full feedback; no pending work is evicted.
 - `jobs list` distinguishes queued, active and finished results; `--json` includes
   the `queued` flag and FIFO record order. `jobs cancel` can cancel either a queued
-  or running job. `jobs remove` only removes a job that has not started; a race
+  or running job. `jobs remove` removes queued or held Interrupted jobs; a race
   with promotion is rejected rather than cancelling a now-running transfer.
   Removed jobs retain a cancelled history record so attached waiters can finish
   truthfully. Once worker cleanup finishes, the next queued job starts.
 - Queued inputs do no network or output/resume-file work until their turn.
   Existing-file and network policy are enforced again by the engine at execution.
   Shutdown cancels queued work without starting it and drains the running worker.
-- The service queue and history are lost on restart: no automatic replay/resume.
+- Queue and history survive restart in private service-owned SQLite. Every
+  unfinished job recovers as **Interrupted**, held without network or output work.
+  Explicitly use **Resume / retry** in the GUI or `rdm jobs retry INSTANCE:ID`
+  (`resume` alias) with a current handle from `rdm jobs list`. This creates a new attempt
+  at the FIFO tail and lets the engine reuse valid partial state where
+  supported; it never forces overwrite or guarantees byte-range resume.
+  Completed/cancelled/failed history is restored; successful jobs cannot be retried.
+  Interrupted records are not evicted until retried or explicitly removed.
+  Shutdown cancels waiting/running work, retaining retryable cancelled history.
+  No login autostart or automatic network replay is added.
   This extends the existing service job set, not a GUI/extension-local queue.
   The older persisted `rdm queue` below is unchanged and is NOT imported, merged
   or processed by this scheduler. Its provider/listing workflows are deliberately
@@ -140,12 +150,34 @@ cargo build -p rdm -p rdm-service --release --locked
   try listing discovery). Empty/failed discovery falls back to managed direct
   files unless the URL is directory-shaped; those retain the legacy path.
 
-This change uses internal IPC **version 3**. Before upgrading, explicitly stop
+This change uses internal IPC **version 4**. Before upgrading, explicitly stop
 any old service with its matching GUI/service binary. Build CLI, service, GUI
 and Native Messaging host from the same checkout if installed; an incompatible
 service is never automatically stopped or replaced. The Firefox extension's
 external Native Messaging protocol remains version 1. Reload the updated Firefox
-extension (0.2.0) too, so it recognizes the new `queued` acknowledgement.
+extension (0.3.0) too, for updated setup/privacy information.
+The old v3 in-memory queue cannot be imported: finish or record pending work
+before stopping the old service.
+
+## Persistent service state and privacy
+
+The Rust service stores its bounded job set in
+`$XDG_STATE_HOME/rdm/service/jobs.sqlite3` (default:
+`~/.local/state/rdm/service/jobs.sqlite3`). The service directory and its `rdm`
+parent are owner-only (0700), with database/lock files owner-only (0600).
+Symlinked/shared state paths, corruption, unknown schemas and write errors fail
+closed: existing state is not silently reset and no independent worker fallback
+runs. A separate durable lock prevents two runtime directories sharing one DB.
+
+Pending/interrupted/failed/cancelled jobs retain their **source URLs in plaintext
+on your local disk**, including any query tokens, for explicit retry. This is
+not encryption or protection against other processes running as your user.
+Successful jobs drop their source URL; bounded terminal eviction removes old
+retry inputs. Public snapshots/logs still omit URLs. Do not share this database
+or its backups. Progress is persisted at state transitions, not on every chunk;
+after a crash, displayed saved byte counts may lag the actual engine partials.
+The engine checks its own partial/resume files and existing output at retry time.
+A lost mutation reply may still mean a committed request: inspect before retrying.
 
 ## Sync
 
@@ -296,5 +328,5 @@ Then load `extensions/firefox/manifest.json` as a temporary add-on from
 required; the extension is unsigned and not an AMO release. See the
 [Firefox setup, permissions and limits](extensions/firefox/README.md) and
 [native host protocol](crates/rdm-native-host/README.md). Existing single-managed-
-download and in-memory history limits still apply. Provider/SFTP/listing/sync/queue
+download and bounded history limits still apply. Provider/SFTP/listing/sync/queue
 routes remain outside service coordination.

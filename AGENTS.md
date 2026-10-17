@@ -18,7 +18,7 @@ The core user-facing workflows are:
   filter extensions and delete safe, verified orphans.
 - `rdm queue …`: persist, inspect, and process a download queue across
   invocations.
-- `rdm jobs list/inspect/cancel/remove`: control shared-service direct downloads.
+- `rdm jobs list/inspect/cancel/remove/retry`: control shared-service direct downloads.
 - `rdm config`: print the effective configuration.
 
 Read `README.md` and the relevant file in `extraInfo/` before changing a
@@ -73,8 +73,9 @@ is explicitly the purpose of the test.
    handles or carry fragments/query data that generic handling can corrupt.
 3. Generic direct HTTP/HTTPS CLI files submit to the per-user service, which
    owns `engine`; default CLI waits, `--detach` returns on acceptance. The GUI,
-   Firefox and CLI share one running worker and a bounded in-memory FIFO. Queued
-   inputs do no network/file work before promotion; only terminal records may
+   Firefox and CLI share one running worker and a bounded durable FIFO. Queued
+   inputs do no network/file work before promotion; unfinished recovery is held as
+   Interrupted until explicit retry; only terminal records other than held Interrupted work may
    be evicted. Cancellation must drain the worker before advancing. Provider/SFTP, directory-shaped fallback,
    sync and queue paths remain legacy and uncoordinated. Listings are discovered by
    `scrape` and become queue work. `sync` chooses its own hoster/SFTP/generic
@@ -187,3 +188,17 @@ constraints, not optional hardening:
 4. Check `git diff --check` and review the diff for leaked URLs, keys, or
    accidental behavior/documentation drift.
 5. Mention any test that could not run and why.
+
+## Shared-service persistence
+
+`crates/rdm-service/src/store.rs` owns the private SQLite image, schema version,
+and durable cross-runtime lock. All SQLite/fsync work is off Tokio workers.
+Commit admission/promotion/results before acknowledgement/publication or engine
+start. Write errors stop admission, cancel/drain workers, and preserve the last
+committed image; never silently recreate corrupt/unknown schemas.
+Recovery creates no engine: unfinished jobs become Interrupted. Explicit Retry
+revalidates current policy and creates a new ID at the tail, retaining the
+stored output/connections/private opt-in. Never replay ambient credentials or
+weaken overwrite/resume rules. Successful history must drop URL-bearing input.
+All process tests MUST isolate XDG_STATE_HOME as well as config/runtime/HOME.
+The original `src/queue` remains separate; no implicit import or migration.

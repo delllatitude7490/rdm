@@ -39,6 +39,7 @@ impl Service {
         command
             .env("XDG_RUNTIME_DIR", root.path().join("runtime"))
             .env("XDG_CONFIG_HOME", root.path().join("config"))
+            .env("XDG_STATE_HOME", root.path().join("state"))
             .env("RDM_ALLOW_PRIVATE", "1")
             .env_remove("RDM_ALLOW_PROXY")
             .stdin(Stdio::null())
@@ -286,7 +287,7 @@ async fn one_owner_duplicate_launch_cancel_and_shutdown_drain() {
 }
 
 #[tokio::test]
-async fn crash_disconnect_and_restart_replace_generation_not_history() {
+async fn crash_disconnect_and_restart_restore_interrupted_with_new_generation() {
     let http = http(false).await;
     let mut service = Service::spawn(tempfile::tempdir().unwrap());
     let old = service.ready().await;
@@ -309,10 +310,10 @@ async fn crash_disconnect_and_restart_replace_generation_not_history() {
     service.child = Service::command(&service.root).spawn().unwrap();
     let new = service.ready().await;
     assert_ne!(new.instance, old.instance);
-    assert!(
-        new.jobs.is_empty(),
-        "do not invent persisted history after a crash"
-    );
+    assert_eq!(new.jobs.len(), 1);
+    assert_eq!(new.jobs[0].result, Some(Finished::Interrupted));
+    assert!(new.jobs[0].retryable);
+    assert!(!new.jobs[0].active());
     let error = client::request_at(
         &service.paths,
         Request::Cancel {
@@ -715,4 +716,396 @@ async fn full_queue_never_evicts_unfinished_work_and_shutdown_discards_pending()
             .join("downloads/replacement.bin.part")
             .exists()
     );
+}
+
+#[tokio::test]
+async fn recovery_holds_pending_and_retry_creates_safe_distinct_attempt() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let hits = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let observed = hits.clone();
+    let router = Router::new().route(
+        "/file.bin",
+        get(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+            async { "durable bytes" }
+        }),
+    );
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let blocked = http(false).await;
+    let mut service = Service::spawn(tempfile::tempdir().unwrap());
+    let old = service.ready().await;
+    client::request_at(&service.paths, service.add(&blocked.base, "active.bin"))
+        .await
+        .unwrap();
+    service.until(|s| s.jobs[0].progress.downloaded > 0).await;
+    client::request_at(&service.paths, service.add(&base, "held.bin"))
+        .await
+        .unwrap();
+    client::request_at(&service.paths, service.add(&base, "held-two.bin"))
+        .await
+        .unwrap();
+    service.child.kill().unwrap();
+    service.child.wait().unwrap();
+    service.child = Service::command(&service.root).spawn().unwrap();
+    let recovered = service.ready().await;
+    assert_ne!(old.instance, recovered.instance);
+    assert_eq!(
+        recovered.jobs.iter().map(|j| j.id).collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    assert!(
+        recovered
+            .jobs
+            .iter()
+            .all(|j| j.result == Some(Finished::Interrupted) && j.retryable)
+    );
+    sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "recovery must not issue even HEAD requests"
+    );
+    assert!(!service.root.path().join("downloads/held.bin.part").exists());
+    let denied = client::request_at(
+        &service.paths,
+        Request::Retry {
+            instance: old.instance,
+            id: 4,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        denied,
+        client::Error::Rejected(ErrorCode::StaleInstance, _)
+    ));
+    let retry = client::request_at(
+        &service.paths,
+        Request::Retry {
+            instance: recovered.instance.clone(),
+            id: 2,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(retry.jobs.last().unwrap().id, 4);
+    let done = service
+        .until(|s| {
+            matches!(
+                s.jobs.last().unwrap().result,
+                Some(Finished::Completed { .. })
+            )
+        })
+        .await;
+    assert_eq!(
+        done.jobs[1].result,
+        Some(Finished::Interrupted),
+        "other pending work remains held"
+    );
+    assert!(!done.jobs[3].retryable, "successful URLs are purged");
+    assert_eq!(
+        fs::read(service.root.path().join("downloads/held.bin")).unwrap(),
+        b"durable bytes"
+    );
+    assert!(!service.root.path().join("downloads/held-two.bin").exists());
+    let denied = client::request_at(
+        &service.paths,
+        Request::Retry {
+            instance: done.instance,
+            id: 4,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        denied,
+        client::Error::Rejected(ErrorCode::Invalid, _)
+    ));
+    service.shutdown().await;
+    service.child = Service::command(&service.root).spawn().unwrap();
+    let again = service.ready().await;
+    assert_eq!(again.jobs.len(), 4);
+    assert!(matches!(
+        again.jobs[3].result,
+        Some(Finished::Completed { bytes: 13, .. })
+    ));
+    assert_eq!(again.jobs[2].result, Some(Finished::Interrupted));
+    service.shutdown().await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn shutdown_history_and_next_id_survive_runtime_directory_recreation() {
+    let blocked = http(false).await;
+    let mut service = Service::spawn(tempfile::tempdir().unwrap());
+    service.ready().await;
+    client::request_at(&service.paths, service.add(&blocked.base, "stop.bin"))
+        .await
+        .unwrap();
+    client::request_at(&service.paths, service.add(&blocked.base, "pending.bin"))
+        .await
+        .unwrap();
+    service.shutdown().await;
+    fs::remove_dir_all(service.root.path().join("runtime")).unwrap();
+    fs::create_dir(service.root.path().join("runtime")).unwrap();
+    fs::set_permissions(
+        service.root.path().join("runtime"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    service.child = Service::command(&service.root).spawn().unwrap();
+    let state = service.ready().await;
+    assert_eq!(state.jobs.len(), 2);
+    assert!(
+        state
+            .jobs
+            .iter()
+            .all(|j| j.result == Some(Finished::Cancelled) && j.retryable)
+    );
+    let retry = client::request_at(
+        &service.paths,
+        Request::Retry {
+            instance: state.instance,
+            id: 2,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(retry.jobs.last().unwrap().id, 3);
+    assert_eq!(
+        retry.jobs.last().unwrap().destination,
+        service
+            .root
+            .path()
+            .join("downloads/pending.bin")
+            .to_string_lossy()
+    );
+    service.shutdown().await;
+}
+
+#[tokio::test]
+async fn failed_admission_commit_stops_without_network_or_reset() {
+    let remote = http(false).await;
+    let mut service = Service::spawn(tempfile::tempdir().unwrap());
+    service.ready().await;
+    let state_dir = service.root.path().join("state/rdm/service");
+    // Directory obstruction works even in containers with CAP_DAC_OVERRIDE.
+    let journal = state_dir.join("jobs.sqlite3-journal");
+    fs::create_dir(&journal).unwrap();
+    let result =
+        client::request_at(&service.paths, service.add(&remote.base, "not-started.bin")).await;
+    fs::remove_dir(&journal).unwrap();
+    assert!(matches!(
+        result.unwrap_err(),
+        client::Error::Rejected(ErrorCode::Internal, _)
+    ));
+    timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(status) = service.child.try_wait().unwrap() {
+                assert!(
+                    !status.success(),
+                    "failed storage must not look like normal shutdown"
+                );
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        !service.root.path().join("downloads").exists(),
+        "engine cannot start before durable admission"
+    );
+    service.child = Service::command(&service.root).spawn().unwrap();
+    assert!(
+        service.ready().await.jobs.is_empty(),
+        "last committed image preserved"
+    );
+    service.shutdown().await;
+}
+
+#[tokio::test]
+async fn held_recovery_at_capacity_is_not_evicted_and_retry_still_works() {
+    let blocked = http(false).await;
+    let mut service = Service::spawn(tempfile::tempdir().unwrap());
+    service.ready().await;
+    for n in 0..64 {
+        client::request_at(
+            &service.paths,
+            service.add(&blocked.base, &format!("held-{n}.bin")),
+        )
+        .await
+        .unwrap();
+    }
+    service.child.kill().unwrap();
+    service.child.wait().unwrap();
+    service.child = Service::command(&service.root).spawn().unwrap();
+    let recovered = service.ready().await;
+    assert_eq!(recovered.jobs.len(), 64);
+    assert!(
+        recovered
+            .jobs
+            .iter()
+            .all(|j| j.result == Some(Finished::Interrupted) && j.retryable)
+    );
+    let denied = client::request_at(&service.paths, service.add(&blocked.base, "no-room.bin"))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        denied,
+        client::Error::Rejected(ErrorCode::Busy, _)
+    ));
+    let retry = client::request_at(
+        &service.paths,
+        Request::Retry {
+            instance: recovered.instance.clone(),
+            id: 20,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(retry.jobs.len(), 64);
+    assert_eq!(retry.jobs.last().unwrap().id, 65);
+    assert!(!retry.jobs.iter().any(|j| j.id == 20));
+    assert_eq!(
+        retry
+            .jobs
+            .iter()
+            .filter(|j| j.result == Some(Finished::Interrupted))
+            .count(),
+        63
+    );
+    let stale = client::request_at(
+        &service.paths,
+        Request::Cancel {
+            instance: recovered.instance.clone(),
+            id: 20,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        stale,
+        client::Error::Rejected(ErrorCode::NotFound, _)
+    ));
+    let removed = client::request_at(
+        &service.paths,
+        Request::RemoveQueued {
+            instance: recovered.instance,
+            id: 1,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(removed.jobs[0].result, Some(Finished::Cancelled));
+    service.shutdown().await;
+}
+
+#[tokio::test]
+async fn failed_cancel_commit_drains_without_promoting_pending_work() {
+    let blocked = http(false).await;
+    let finite = http(true).await;
+    let mut service = Service::spawn(tempfile::tempdir().unwrap());
+    let initial = service.ready().await;
+    client::request_at(&service.paths, service.add(&blocked.base, "active.bin"))
+        .await
+        .unwrap();
+    service.until(|s| s.jobs[0].progress.downloaded > 0).await;
+    client::request_at(&service.paths, service.add(&finite.base, "untouched.bin"))
+        .await
+        .unwrap();
+    let journal = service
+        .root
+        .path()
+        .join("state/rdm/service/jobs.sqlite3-journal");
+    fs::create_dir(&journal).unwrap();
+    let error = client::request_at(
+        &service.paths,
+        Request::Cancel {
+            instance: initial.instance,
+            id: 1,
+        },
+    )
+    .await
+    .unwrap_err();
+    fs::remove_dir(&journal).unwrap();
+    assert!(matches!(
+        error,
+        client::Error::Rejected(ErrorCode::Internal, _)
+    ));
+    timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(status) = service.child.try_wait().unwrap() {
+                assert!(!status.success());
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        !service
+            .root
+            .path()
+            .join("downloads/untouched.bin.part")
+            .exists()
+    );
+    assert!(!service.root.path().join("downloads/untouched.bin").exists());
+    service.child = Service::command(&service.root).spawn().unwrap();
+    let recovered = service.ready().await;
+    assert_eq!(recovered.jobs.len(), 2);
+    assert!(
+        recovered
+            .jobs
+            .iter()
+            .all(|j| j.result == Some(Finished::Interrupted))
+    );
+    service.shutdown().await;
+}
+
+#[tokio::test]
+async fn retry_revalidates_current_service_network_policy_without_replaying_env() {
+    let blocked = http(false).await;
+    let mut service = Service::spawn(tempfile::tempdir().unwrap());
+    service.ready().await;
+    // GUI Add had no per-job private flag: its old ambient service opt-in must
+    // NOT become a permanently stored per-job permission during recovery.
+    client::request_at(&service.paths, service.add(&blocked.base, "permission.bin"))
+        .await
+        .unwrap();
+    service.child.kill().unwrap();
+    service.child.wait().unwrap();
+    service.child = Service::command(&service.root)
+        .env_remove("RDM_ALLOW_PRIVATE")
+        .spawn()
+        .unwrap();
+    let recovered = service.ready().await;
+    let error = client::request_at(
+        &service.paths,
+        Request::Retry {
+            instance: recovered.instance,
+            id: 1,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        client::Error::Rejected(ErrorCode::Invalid, _)
+    ));
+    let held = service.ready().await;
+    assert_eq!(held.jobs.len(), 1);
+    assert_eq!(held.jobs[0].result, Some(Finished::Interrupted));
+    assert!(held.jobs[0].retryable);
+    assert!(held.jobs[0].retried_as.is_none());
+    service.shutdown().await;
 }

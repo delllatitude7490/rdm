@@ -162,6 +162,8 @@ where
 
     let mut join_set: JoinSet<Result<u64>> = JoinSet::new();
     let mut total_bytes: u64 = initial_completed;
+    let worker_cancel = ctx.cancel.child_token();
+    let mut failure = None;
 
     while !queue.is_empty() || !join_set.is_empty() {
         // A server that asked for a pause gets one before any further range
@@ -173,7 +175,8 @@ where
             tokio::select! {
                 biased;
                 _ = ctx.cancel.cancelled() => {
-                    anyhow::bail!("Cancelled while waiting out the server's back-off");
+                    failure = Some(anyhow::anyhow!("Cancelled while waiting out the server's back-off"));
+                    break;
                 }
                 _ = tokio::time::sleep(wait) => {}
             }
@@ -189,7 +192,7 @@ where
             let client = ctx.client.clone();
             let url = ctx.fetch_url.to_owned();
             let path = temp_path.to_owned();
-            let cancel = ctx.cancel.clone();
+            let cancel = worker_cancel.clone();
             let config = ctx.retry_config.clone();
             let chunk_progress = chunk_counters
                 .iter()
@@ -222,17 +225,44 @@ where
 
         match join_set.join_next().await {
             Some(Ok(Ok(bytes))) => total_bytes += bytes,
-            Some(Ok(Err(e))) => return Err(e),
-            Some(Err(e)) => return Err(anyhow::anyhow!("Worker panic: {}", e)),
+            Some(Ok(Err(e))) => {
+                failure = Some(e);
+                break;
+            }
+            Some(Err(e)) => {
+                failure = Some(anyhow::anyhow!("Worker panic: {}", e));
+                break;
+            }
             None => break,
         }
     }
 
+    // Dropping JoinSet aborts worker futures and leaves autosave detached. A
+    // retry could then race old writes/checkpoints for the same partial file.
+    // Cancel only this file's remaining ranges, drain, then stop both helpers.
+    if failure.is_some() {
+        worker_cancel.cancel();
+    }
+    while join_set.join_next().await.is_some() {}
     done_flag.store(true, Ordering::Relaxed);
     if let Some(h) = monitor_handle {
         let _ = h.await;
     }
     let _ = autosave_handle.await;
+
+    if let Some(error) = failure {
+        let snapshot = {
+            let mut meta = shared_meta.lock().await;
+            for (id, counter) in &chunk_counters {
+                resume::update_progress(&mut meta, *id, counter.load(Ordering::SeqCst));
+            }
+            meta.clone()
+        };
+        // Ranges publish counters only after flush+sync. All writers/helpers
+        // are drained before the terminal result becomes visible to a retry.
+        resume::save_atomic(meta_path, &snapshot).await?;
+        return Err(error);
+    }
 
     if total_bytes != ctx.file_size {
         anyhow::bail!(
